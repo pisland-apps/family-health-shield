@@ -15,63 +15,7 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f7cff'/%3E%3Cstop offset='1' stop-color='%2310b981'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M32 15c-9-11-24-2-22 10 1.5 9 12 16 22 24 10-8 20.5-15 22-24 2-12-13-21-22-10z' fill='white' opacity='0.95'/%3E%3Crect x='27.5' y='24' width='9' height='22' rx='2' fill='%234f7cff'/%3E%3Crect x='20' y='31.5' width='24' height='9' rx='2' fill='%234f7cff'/%3E%3C/svg%3E">
   <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
   <link rel="shortcut icon" href="favicon.ico">
-  <meta http-equiv="Content-Security-Policy" content="
-    default-src 'self';
-    script-src 'self' 'sha256-mW/29YLQtBFfmJKoY2HmlN24haezMq21SNDB80wxjRo=';
-    style-src 'self' 'unsafe-inline';
-    img-src 'self' data: blob:;
-    font-src 'self';
-    connect-src 'self';
-    frame-src 'self' blob:;
-    worker-src 'self';
-    manifest-src 'self';
-    object-src 'none';
-    base-uri 'none';
-    form-action 'none';
-    frame-ancestors 'none';
-  ">
-  <!--
-    CSP notes:
-    - script-src allows 'self' (for vendor/jszip.min.js) plus ONE specific
-      inline script by exact SHA-256 hash — that's the app's own big
-      <script> block below. No 'unsafe-inline', no CDN origins.
-      *** IMPORTANT / EASY TO FORGET ***: this hash is computed over the
-      EXACT bytes of that <script> block's content. If you edit ANYTHING
-      inside it — even one character, even just fixing a typo — this hash
-      no longer matches and the browser will refuse to run the whole app
-      (blank page, exactly like the bug you just hit). Whenever you change
-      the inline script, you must recompute the hash and update the value
-      above in the same edit. See the recompute command right before the
-      closing </script> tag near the bottom of this file.
-      A more maintenance-proof long-term fix is to move this inline script
-      into an external file (e.g. app.js) and reference it with
-      <script src="app.js"></script> — then plain 'self' covers it forever
-      and you never have to touch this hash again. Worth doing if this file
-      keeps changing.
-    - style-src keeps 'unsafe-inline' because this file uses inline style="..."
-      attributes throughout (a nonce/hash scheme isn't practical for a
-      hand-authored single-file app). This is an intentional, narrower
-      trade-off: inline CSS can be used to exfiltrate data via attribute
-      selectors, but cannot execute JS on its own, so it's a much smaller risk
-      than inline-script would be. If you later move all styling to the
-      <style> block + classes, drop 'unsafe-inline' from style-src too.
-    - img-src allows data:/blob: because attachments are rendered from
-      IndexedDB-stored data URLs and blob: object URLs (openAttachment()).
-    - frame-src allows blob: for the PDF-attachment viewer <iframe>.
-    - connect-src/object-src/base-uri/form-action/frame-ancestors are locked
-      down since the app makes no network calls, embeds no plugins, and has
-      no <form> or embeddable use case.
-  -->
-  <script src="vendor/jszip.min.js"></script>
-  <!--
-    vendor/jszip.min.js is NOT included in this zip — this sandbox has no
-    network access, so the placeholder-free real file couldn't be fetched
-    here. Before you deploy, put the real jszip 3.10.1 file at that exact
-    path. See README.md in this project for the one-line command (it
-    downloads AND self-verifies against the SRI hash you already confirmed
-    against cdnjs, so you get the supply-chain check even though the file
-    now lives locally and no longer needs a runtime integrity="" attribute).
-  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>
     :root {
       --bg: #f5f7fa;
@@ -2006,22 +1950,6 @@
         });
       });
 
-      // Bind Reports card buttons (Overview tab) — was inline onclick="", moved to
-      // addEventListener so the CSP script-src can drop 'unsafe-inline'
-      main.querySelectorAll('[data-report-key]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          openReportPreview(btn.dataset.reportKey, btn.dataset.reportMember);
-        });
-      });
-
-      // Bind "+ Add Reminder" button (Overview / Reminders tabs) — same reason
-      const btnAddReminder = main.querySelector('[data-add-reminder]');
-      if (btnAddReminder) {
-        btnAddReminder.addEventListener('click', () => {
-          openReminderModal(btnAddReminder.dataset.addReminder);
-        });
-      }
-
       // Bind attachment click-to-open
       main.querySelectorAll('.attachment-item[data-record-id]').forEach(item => {
         item.addEventListener('click', () => {
@@ -2094,13 +2022,13 @@
         <div class="card">
           <div class="card-title">📄 Reports</div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;">
-            <button class="btn btn-secondary btn-sm" data-report-key="summary" data-report-member="${m.id}">📋 Health Summary</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="vaccine" data-report-member="${m.id}">💉 Vaccine Record</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="medication" data-report-member="${m.id}">💊 Medication List</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="lab" data-report-member="${m.id}">🔬 Lab Results</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="bp" data-report-member="${m.id}">🩺 BP Log</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="growth" data-report-member="${m.id}">📏 Growth Chart</button>
-            <button class="btn btn-secondary btn-sm" data-report-key="annual" data-report-member="${m.id}">📅 Annual Report</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('summary','${m.id}')">📋 Health Summary</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('vaccine','${m.id}')">💉 Vaccine Record</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('medication','${m.id}')">💊 Medication List</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('lab','${m.id}')">🔬 Lab Results</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('bp','${m.id}')">🩺 BP Log</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('growth','${m.id}')">📏 Growth Chart</button>
+            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('annual','${m.id}')">📅 Annual Report</button>
           </div>
         </div>
       `;
@@ -2183,7 +2111,7 @@
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div class="card-title" style="margin-bottom:0;">⏰ All Reminders</div>
-            <button class="btn btn-primary btn-sm" data-add-reminder="${memberId}">+ Add Reminder</button>
+            <button class="btn btn-primary btn-sm" onclick="openReminderModal('${memberId}')">+ Add Reminder</button>
           </div>
           <div class="reminder-list" style="margin-top:12px;">
             ${reminders.map(r => `
@@ -5417,21 +5345,5 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     window.addEventListener('DOMContentLoaded', updateOnlineStatusBanner);
 
   </script>
-  <!--
-    To recompute the script-src hash above after editing the <script> block
-    that just closed (do this EVERY time you touch it, or the app goes
-    blank under this CSP — see the CSP note near the top of <head>):
-
-    Node.js:
-      node -e "
-        const fs=require('fs'),crypto=require('crypto');
-        const html=fs.readFileSync('index.html','utf8');
-        const m=html.match(/<script>\n([\s\S]*?)\n  <\/script>/);
-        console.log('sha256-'+crypto.createHash('sha256').update(m[1]+'\n').digest('base64'));
-      "
-
-    Then paste the resulting sha256-... value into the script-src line in
-    the CSP <meta> tag, replacing the old hash.
-  -->
 </body>
 </html>

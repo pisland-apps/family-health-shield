@@ -11,7 +11,7 @@
 // IMPORTANT: bump CACHE_VERSION any time you change index.html (or any
 // other app-shell file) and redeploy, so returning visitors get the new
 // version instead of a stale cached copy.
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -22,7 +22,7 @@ const APP_SHELL = [
   './icons/icon-512.png',
   './icons/icon-maskable-192.png',
   './icons/icon-maskable-512.png',
-  './vendor/jszip.min.js'
+  'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
 ];
 
 self.addEventListener('install', (event) => {
