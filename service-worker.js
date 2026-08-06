@@ -11,7 +11,7 @@
 // IMPORTANT: bump CACHE_VERSION any time you change index.html (or any
 // other app-shell file) and redeploy, so returning visitors get the new
 // version instead of a stale cached copy.
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [

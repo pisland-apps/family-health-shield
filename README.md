@@ -59,6 +59,21 @@ const CACHE_VERSION = 'v1';
 
 **每次你修改了 `index.html` / `manifest.json` / 图标等任何文件并重新 push 后,把这个版本号改一下**(比如改成 `'v2'`),否则老用户的浏览器会因为离线缓存而看到旧版本,直到缓存自然过期。
 
+## 修改了 `index.html` 里的内联 `<script>` 之后
+
+`index.html` 的 CSP 用 `sha256-...` 哈希白名单锁定了内联脚本,而不是 `unsafe-inline`(见 `index.html` 头部的设计说明注释)。改动那段脚本内容后,必须同步更新 CSP 里的哈希,否则线上会白屏(脚本被 CSP 拦截)。
+
+```bash
+python3 scripts/update_csp_hash.py           # 重新计算并自动写回哈希
+python3 scripts/update_csp_hash.py --check   # 只检查是否过期,不修改文件(exit 1 = 过期)
+```
+
+仓库自带一个 pre-commit hook 会自动跑 `--check`,提交前忘了更新哈希会被拦下来。首次 clone 后启用一次即可:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## 安全说明(务必阅读)
 
 - 密码**没有找回机制**。忘记密码,已加密的附件和数据将无法恢复。

