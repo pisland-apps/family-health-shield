@@ -1,6 +1,21 @@
     // Use a different storage key to avoid conflicts with old versions
     const STORAGE_KEY = 'family_health_tracker_v3';
 
+    // Display-only version label, shown in the bottom-right badge (visible even on the
+    // lock screen, before the passcode is entered — see #versionBadge in index.html).
+    // This is purely a "what code shipped in this build" label — it is NOT read by the
+    // Service Worker and has no effect on caching. It does NOT auto-sync with
+    // CACHE_VERSION in service-worker.js since they live in different files — bump both
+    // together on every deploy. (Reminder comment also left in service-worker.js.)
+    const APP_VERSION = 'v5';
+    const APP_VERSION_DATE = '2026-08-08';
+    // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
+    // (including #versionBadge) already exists by the time this line runs. Deliberately
+    // done at top level, not inside init()/initAppData(), so it renders before any
+    // passcode check and regardless of lock state.
+    const versionBadgeEl = document.getElementById('versionBadge');
+    if (versionBadgeEl) versionBadgeEl.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
+
     // Returns YYYY-MM-DD in the browser's LOCAL timezone (not UTC).
     // toISOString() always returns UTC, which is off by a day for anyone
     // east of UTC in the early morning (e.g. 2am in Malaysia/UTC+8 is still

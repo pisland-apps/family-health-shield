@@ -11,7 +11,16 @@
 // IMPORTANT: bump CACHE_VERSION any time you change index.html (or any
 // other app-shell file) and redeploy, so returning visitors get the new
 // version instead of a stale cached copy.
-const CACHE_VERSION = 'v4';
+//
+// NOTE: this is a separate number from APP_VERSION/APP_VERSION_DATE at the
+// top of app.js (the display label shown in the version badge). They don't
+// sync automatically since they live in different files - bump both on
+// every deploy. CACHE_VERSION controls what the Service Worker actually
+// serves; APP_VERSION only controls what the badge displays. If the badge
+// ever shows a version that doesn't match what you expect after deploying,
+// that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
+// Service Worker/cache in devtools - not a sign the deploy failed.
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
