@@ -1,4 +1,4 @@
-# Family Health & Shield
+# Family Health & Shield*
 
 一个纯前端(无后端服务器)的家庭健康档案 + 保险管理工具,支持:
 
