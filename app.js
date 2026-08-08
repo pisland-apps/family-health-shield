@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v7';
+    const APP_VERSION = 'v8';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -935,7 +935,7 @@
         const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
         return `
           <div class="member-item ${m.id === currentMemberId ? 'active' : ''}" data-id="${m.id}">
-            <div class="member-avatar">${escapeHtml(m.name[0])}</div>
+            <div class="member-avatar">${escapeHtml(m.nameZh && m.nameZh.trim() ? m.nameZh.trim()[0] : m.name[0])}</div>
             <div class="member-info">
               <div class="member-name">${escapeHtml(m.name)}</div>
               ${m.nameZh ? `<div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(m.nameZh)}</div>` : ''}
