@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v5';
+    const APP_VERSION = 'v6';
     const APP_VERSION_DATE = '2026-08-08';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -160,6 +160,16 @@
       });
     }
 
+    async function idbDeleteRaw(id) {
+      const db = await idbOpen();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(id);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
     // ========== ATTACHMENT ENCRYPTION (PBKDF2 + AES-GCM via Web Crypto) ==========
     // Encrypts/decrypts the attachment BLOBS stored in IndexedDB only. The JSON
     // member/policy data in localStorage, and all exported JSON/ZIP backups,
@@ -258,12 +268,29 @@
     // the actual data-encryption key is still 100% derived from the passcode,
     // exactly as if the user had typed it.
     const BIO_CONFIG_KEY = 'family_health_tracker_v3_biometric';
+    // Non-extractable "gate mode" wrapping key lives in IndexedDB (it's a real
+    // CryptoKey object, structured-cloned in - can't be stored as a string in
+    // localStorage). Only used as a fallback when PRF isn't available.
+    const BIO_GATE_KEY_ID = 'family_health_tracker_v3_biometric_gate_key';
     function getBioConfig() {
       try { return JSON.parse(localStorage.getItem(BIO_CONFIG_KEY)) || null; } catch { return null; }
     }
     function setBioConfig(cfg) { localStorage.setItem(BIO_CONFIG_KEY, JSON.stringify(cfg)); }
-    function clearBioConfig() { localStorage.removeItem(BIO_CONFIG_KEY); }
+    async function clearBioConfig() {
+      localStorage.removeItem(BIO_CONFIG_KEY);
+      try { await idbDeleteRaw(BIO_GATE_KEY_ID); } catch { /* nothing to clean up */ }
+    }
     function isBiometricEnrolled() { return !!getBioConfig(); }
+
+    // Normalizes a stored biometric record to an explicit mode, so records
+    // written before the 'method' field existed still work: presence of
+    // `prfSalt` means it was PRF-mode, `wrappingKeyStored` means gate-mode.
+    function bioMethodOf(bcfg) {
+      if (bcfg.method) return bcfg.method;
+      if (bcfg.prfSalt) return 'prf';
+      if (bcfg.wrappingKeyStored) return 'gate';
+      return null;
+    }
 
     async function isPlatformAuthenticatorAvailable() {
       try {
@@ -285,8 +312,12 @@
       );
     }
 
-    // Registers a new platform authenticator credential and uses its PRF
-    // output to wrap the given (already-verified) passcode. Throws with a
+    // Registers a platform authenticator credential, trying PRF first
+    // (stronger binding: the wrapping key is derived straight from the
+    // biometric-gated secret) and transparently falling back to "gate mode"
+    // (biometric is just a pass/fail check; the real wrapping key is a
+    // separately-generated, non-extractable AES key held in IndexedDB) on
+    // devices/browsers where PRF isn't available. Throws with a
     // human-readable message on any failure (cancelled, unsupported, etc.).
     async function enrollBiometric(passcode) {
       const cfg = getCryptoConfig();
@@ -300,37 +331,70 @@
 
       const userId = crypto.getRandomValues(new Uint8Array(16));
       const prfSalt = crypto.getRandomValues(new Uint8Array(32));
+      const baseCreateOptions = {
+        rp: { name: 'Family Health & Shield' },
+        user: { id: userId, name: 'family-health-shield', displayName: 'Family Health & Shield' },
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
+        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+        timeout: 60000
+      };
 
-      const cred = await navigator.credentials.create({
-        publicKey: {
-          rp: { name: 'Family Health & Shield' },
-          user: { id: userId, name: 'family-health-shield', displayName: 'Family Health & Shield' },
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
-          authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
-          extensions: { prf: {} },
-          timeout: 60000
-        }
-      });
+      // Step 1: try registering WITH the PRF extension requested. Some
+      // Android devices/Chrome versions throw synchronously the moment PRF
+      // is requested, before the user even sees a fingerprint prompt - so if
+      // this throws, silently retry without PRF rather than surfacing
+      // "device not supported" and giving up.
+      let cred;
+      let requestedPrf = true;
+      try {
+        cred = await navigator.credentials.create({
+          publicKey: { ...baseCreateOptions, extensions: { prf: {} } }
+        });
+      } catch {
+        requestedPrf = false;
+        cred = await navigator.credentials.create({ publicKey: baseCreateOptions });
+      }
       if (!cred) throw new Error('Biometric setup was cancelled.');
 
-      // Most browsers only return the actual PRF output on a follow-up
-      // assertion (get()), not on creation - so immediately evaluate it once.
-      const assertion = await navigator.credentials.get({
-        publicKey: {
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          allowCredentials: [{ id: cred.rawId, type: 'public-key' }],
-          userVerification: 'required',
-          extensions: { prf: { eval: { first: prfSalt } } }
+      // Step 2: figure out whether we actually got usable PRF output. Some
+      // browsers return it directly from create(); most only return it on a
+      // follow-up get(). If we never requested the extension, or neither
+      // attempt yields a result, this device doesn't have usable PRF.
+      let prfResult = null;
+      if (requestedPrf) {
+        const createExt = cred.getClientExtensionResults();
+        prfResult = createExt && createExt.prf && createExt.prf.results && createExt.prf.results.first;
+        if (!prfResult) {
+          try {
+            const assertion = await navigator.credentials.get({
+              publicKey: {
+                challenge: crypto.getRandomValues(new Uint8Array(32)),
+                allowCredentials: [{ id: cred.rawId, type: 'public-key' }],
+                userVerification: 'required',
+                extensions: { prf: { eval: { first: prfSalt } } }
+              }
+            });
+            const getExt = assertion.getClientExtensionResults();
+            prfResult = getExt && getExt.prf && getExt.prf.results && getExt.prf.results.first;
+          } catch { prfResult = null; }
         }
-      });
-      const ext = assertion.getClientExtensionResults();
-      const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
-      if (!prfResult) throw new Error("This device/browser doesn't support biometric-backed encryption (WebAuthn PRF).");
+      }
 
-      const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
-      const wrapped = await encryptText(passcode, wrapKey);
-      setBioConfig({ credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), wrapped });
+      if (prfResult) {
+        // ----- PRF mode: wrapping key is derived from the PRF secret itself -----
+        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
+        const wrapped = await encryptText(passcode, wrapKey);
+        setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), wrapped });
+      } else {
+        // ----- Gate mode fallback: biometric is a pass/fail check; the real
+        // wrapping key is a separately generated, non-extractable CryptoKey
+        // stored as-is (structured clone) in IndexedDB. -----
+        const gateKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+        const wrapped = await encryptText(passcode, gateKey);
+        await idbPutRaw(BIO_GATE_KEY_ID, gateKey);
+        setBioConfig({ method: 'gate', credentialId: bufToB64(cred.rawId), wrappingKeyStored: true, wrapped });
+      }
     }
 
     // Prompts the biometric sensor and returns the recovered passcode string,
@@ -338,20 +402,37 @@
     async function tryBiometricUnlockPasscode() {
       const bcfg = getBioConfig();
       if (!bcfg) return null;
+      const method = bioMethodOf(bcfg);
       try {
-        const assertion = await navigator.credentials.get({
-          publicKey: {
-            challenge: crypto.getRandomValues(new Uint8Array(32)),
-            allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
-            userVerification: 'required',
-            extensions: { prf: { eval: { first: b64ToBuf(bcfg.prfSalt) } } }
-          }
-        });
-        const ext = assertion.getClientExtensionResults();
-        const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
-        if (!prfResult) return null;
-        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
-        return await decryptText(bcfg.wrapped, wrapKey);
+        if (method === 'prf') {
+          const assertion = await navigator.credentials.get({
+            publicKey: {
+              challenge: crypto.getRandomValues(new Uint8Array(32)),
+              allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
+              userVerification: 'required',
+              extensions: { prf: { eval: { first: b64ToBuf(bcfg.prfSalt) } } }
+            }
+          });
+          const ext = assertion.getClientExtensionResults();
+          const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+          if (!prfResult) return null;
+          const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
+          return await decryptText(bcfg.wrapped, wrapKey);
+        } else if (method === 'gate') {
+          // No PRF eval needed here - the credentials.get() call itself is
+          // the biometric "pass/fail" gate; the real key never touches WebAuthn.
+          await navigator.credentials.get({
+            publicKey: {
+              challenge: crypto.getRandomValues(new Uint8Array(32)),
+              allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
+              userVerification: 'required'
+            }
+          });
+          const gateKey = await idbGetRaw(BIO_GATE_KEY_ID);
+          if (!gateKey) return null;
+          return await decryptText(bcfg.wrapped, gateKey);
+        }
+        return null; // unrecognized/corrupt record
       } catch {
         return null;
       }
@@ -4323,7 +4404,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!(await ensureUnlocked())) return;
       await reencryptAllAttachments(false);
       localStorage.removeItem(CRYPTO_CONFIG_KEY);
-      clearBioConfig(); // biometric unlock is meaningless without a passcode-derived key behind it
+      await clearBioConfig(); // biometric unlock is meaningless without a passcode-derived key behind it
       cryptoLock();
       saveData(); // re-writes the main health + insurance data blob as plaintext
       alert('Encryption disabled — your data and attachments are now stored as plaintext.');
@@ -4346,7 +4427,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     });
     document.getElementById('btnRemoveBiometric').addEventListener('click', async () => {
       if (!confirm('Remove biometric unlock from this device? You will need to enter your passcode manually from now on.')) return;
-      clearBioConfig();
+      await clearBioConfig();
       await renderSecurityModalState();
     });
 
