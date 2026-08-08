@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v6';
-    const APP_VERSION_DATE = '2026-08-08';
+    const APP_VERSION = 'v7';
+    const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -980,7 +980,11 @@
     }
 
     function closeSidebarOnMobile() {
-      if (window.innerWidth <= 768) toggleSidebar(false);
+      if (window.innerWidth <= 768) { toggleSidebar(false); return; }
+      // Tablet rail (touch, wider than phone): also collapse back to the
+      // avatar-only rail after picking a member. Desktops/laptops (mouse,
+      // hover:hover) never match this, so PC behavior is untouched.
+      if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) toggleSidebar(false);
     }
 
     // ========== MAIN CONTENT ==========
