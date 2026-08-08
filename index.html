@@ -185,7 +185,8 @@
       .sidebar .member-item { justify-content: center; gap: 0; padding: 10px 4px; }
       .sidebar .member-info,
       .sidebar .add-member-btn,
-      .sidebar #storageMeter { display: none; }
+      .sidebar #storageMeter,
+      .sidebar .member-delete { display: none; }
 
       .sidebar.open {
         position: fixed; top: 65px; left: 0; bottom: 0;
@@ -197,6 +198,9 @@
       .sidebar.open .member-info,
       .sidebar.open .add-member-btn,
       .sidebar.open #storageMeter { display: block; }
+      /* Touch devices don't reliably fire :hover, so once expanded show the
+         delete "x" outright instead of relying on hover-to-reveal. */
+      .sidebar.open .member-delete { display: flex; opacity: 1; }
 
       .sidebar-backdrop.open {
         display: block; position: fixed; top: 65px; left: 0; right: 0; bottom: 0;
