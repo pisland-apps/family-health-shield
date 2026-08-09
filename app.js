@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v9';
+    const APP_VERSION = 'v10';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -923,6 +923,17 @@
       document.getElementById('mBloodAttachment').addEventListener('change', handleBloodAttachment);
     }
 
+    // Picks which character of the Chinese name to show as the sidebar
+    // avatar letter, per the member's saved nameZhAvatarIdx (1/2/3).
+    // Falls back gracefully if the name is shorter than the chosen index,
+    // and falls back to the English name's first letter if no Chinese name.
+    function getAvatarChar(m) {
+      const zh = m.nameZh && m.nameZh.trim();
+      if (!zh) return m.name[0];
+      const idx = Math.min(Math.max(parseInt(m.nameZhAvatarIdx) || 1, 1), zh.length) - 1;
+      return zh[idx];
+    }
+
     // ========== MEMBER LIST ==========
     function renderMemberList() {
       updateStorageMeter();
@@ -935,7 +946,7 @@
         const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
         return `
           <div class="member-item ${m.id === currentMemberId ? 'active' : ''}" data-id="${m.id}">
-            <div class="member-avatar">${escapeHtml(m.nameZh && m.nameZh.trim() ? m.nameZh.trim()[0] : m.name[0])}</div>
+            <div class="member-avatar">${escapeHtml(getAvatarChar(m))}</div>
             <div class="member-info">
               <div class="member-name">${escapeHtml(m.name)}</div>
               ${m.nameZh ? `<div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(m.nameZh)}</div>` : ''}
@@ -1789,6 +1800,7 @@
           if (saveBtn) saveBtn.textContent = 'Save Changes';
           document.getElementById('mName').value = m.name || '';
           document.getElementById('mNameZh').value = m.nameZh || '';
+          document.getElementById('mNameZhAvatarIdx').value = m.nameZhAvatarIdx || 1;
           document.getElementById('mGender').value = m.gender || 'Male';
           document.getElementById('mBirth').value = m.birth || '';
           document.getElementById('mBlood').value = m.blood || 'Unknown';
@@ -1842,9 +1854,10 @@
       if (type === 'member') {
         editingMemberId = null;
         tempBloodAttachment = null;
-        ['mName','mBirth','mHeight','mAllergies','mHistory','mEmergency'].forEach(id => document.getElementById(id).value = '');
+        ['mName','mNameZh','mBirth','mHeight','mAllergies','mHistory','mEmergency'].forEach(id => document.getElementById(id).value = '');
         document.getElementById('mGender').value = 'Male';
         document.getElementById('mBlood').value = 'Unknown';
+        document.getElementById('mNameZhAvatarIdx').value = '1';
         document.getElementById('bloodAttachmentPreview').innerHTML = '';
       } else {
         editingRecordId = null;
@@ -1871,6 +1884,7 @@
       const fields = {
         name,
         nameZh: document.getElementById('mNameZh').value.trim(),
+        nameZhAvatarIdx: parseInt(document.getElementById('mNameZhAvatarIdx').value) || 1,
         gender: document.getElementById('mGender').value,
         birth: document.getElementById('mBirth').value,
         blood: document.getElementById('mBlood').value,
@@ -2795,6 +2809,7 @@
           id: raw.id ? String(raw.id) : (Date.now() + i).toString(),
           name: raw.name,
           nameZh: raw.nameZh || '',
+          nameZhAvatarIdx: parseInt(raw.nameZhAvatarIdx) || 1,
           gender: raw.gender || 'Male',
           birth: raw.birth || '',
           blood: raw.blood || 'Unknown',
