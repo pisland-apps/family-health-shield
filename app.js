@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v11';
+    const APP_VERSION = 'v12';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -1471,6 +1471,20 @@
           iframe.src = url;
           iframe.style.cssText = 'width:100%;height:70vh;border:0;';
           body.appendChild(iframe);
+          // Chrome on Android (incl. installed PWAs) does not reliably render
+          // PDFs embedded in an <iframe>/<embed> - the iframe above can come up
+          // blank there even though the exact same blob renders fine in Chrome's
+          // own full-screen PDF viewer. Desktop/iOS Safari don't have this
+          // problem, but there's no reliable way to feature-detect "did the
+          // iframe actually render a PDF" from blob content, so we just always
+          // offer this fallback beneath it rather than guessing by platform.
+          const fallback = document.createElement('button');
+          fallback.type = 'button';
+          fallback.className = 'btn btn-secondary btn-sm';
+          fallback.style.cssText = 'margin-top:10px;';
+          fallback.textContent = 'PDF not showing above? Open in full-screen viewer';
+          fallback.addEventListener('click', () => window.open(url, '_blank'));
+          body.appendChild(fallback);
         } else {
           const img = document.createElement('img');
           img.src = url;
