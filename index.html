@@ -5,7 +5,7 @@
 
   <!-- ============================================================
        Content-Security-Policy —— 设计说明 / 风险评估（供以后审计或收紧策略时查阅）
-       更新日期：2026-08-06
+       更新日期：2026-08-09
 
        目标：降低 XSS 的“利用后果”，而不是依赖它防住已知的输入转义问题
        （转义问题另见 escapeHtml() 的使用审计，已逐一走查全部 innerHTML /
@@ -63,13 +63,21 @@
             本身不支持自定义响应头。这是本次改动已知但未解决的限制，留给
             以后部署到支持自定义头的平台时再补。
 
-       5. img-src / frame-src 放开了 data: 和 blob:：
+       5. img-src 放开了 data: 和 blob:：
           - data: 用于内置的 SVG favicon 以及附件缩略图（图片/PDF 都是先转成
             data URL 存 IndexedDB，渲染时再用）。
-          - blob: 用于附件查看器（URL.createObjectURL 生成的 blob URL 赋给
-            <img>/<iframe> 预览图片和 PDF）和导出下载（a.href = blob URL）。
+          - blob: 用于附件查看器里 <img> 预览图片、以及下载按钮
+            （a.href = blob URL）。
           - 这两个 scheme 都只会指向“本机内存里生成的内容”，不会被攻击者
             远程操控成外部地址，风险可控。
+          - 2026-08-09 更新：PDF 预览已从 <iframe src="blob:..."> 改为用
+            pdf.js 把 PDF 解码后逐页画到 <canvas> 上（做法与
+            tax-tracker 一致），不再需要把 blob URL 交给浏览器自己的 PDF
+            插件渲染，也就不再需要 frame-src 允许 blob:——干脆把
+            frame-src 整条指令删掉，交给 default-src 'none' 兜底，直接禁止
+            本页面被任何来源 <iframe> 嵌入内容，比之前的 'self' blob: 更严格。
+          - worker-src 'self' 用于加载 ./lib/pdf.worker.min.js（pdf.js 的
+            后台线程），vendored 在本地，不引入任何第三方源。
 
        6. connect-src 'self'：应用是离线优先、纯本地存储（IndexedDB），代码里
           没有 fetch()/XMLHttpRequest 调用，理论上可以设成 'none'，但留 'self'
@@ -82,7 +90,6 @@
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
-    frame-src 'self' blob:;
     worker-src 'self';
     manifest-src 'self';
     object-src 'none';
@@ -104,6 +111,16 @@
   <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
   <link rel="shortcut icon" href="favicon.ico">
   <script src="lib/jszip.min.js"></script>
+  <!--
+    pdf.js — loaded here (rather than left to app.js) so pdfjsLib exists
+    before app.js runs and configures its worker. Vendored locally at
+    ./lib/pdf.min.js (pdfjs-dist, same build as tax-tracker's copy) rather
+    than a CDN, so script-src can stay 'self' with no CDN origin or SRI
+    hash to keep in sync. Used by the attachment viewer to render PDF
+    pages onto <canvas> instead of handing a blob URL to the browser's own
+    PDF plugin (see openAttachment() in app.js for why).
+  -->
+  <script src="lib/pdf.min.js" referrerpolicy="no-referrer"></script>
   <style>
     :root {
       --bg: #f5f7fa;

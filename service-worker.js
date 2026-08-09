@@ -1,8 +1,9 @@
 // Family Health & Shield - Service Worker
 // ------------------------------------------------------------------
 // Provides offline support: after the first successful load, the entire
-// app (HTML/CSS/JS, manifest, icons, and the JSZip library used by
-// "Pack ZIP") keeps working with no network connection at all.
+// app (HTML/CSS/JS, manifest, icons, the JSZip library used by
+// "Pack ZIP", and the pdf.js library used to preview PDF attachments)
+// keeps working with no network connection at all.
 //
 // All actual health/insurance data lives in localStorage/IndexedDB on the
 // user's own device - this worker only caches the STATIC APP FILES needed
@@ -20,7 +21,7 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v13';
+const CACHE_VERSION = 'v14';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -32,7 +33,9 @@ const APP_SHELL = [
   './icons/icon-512.png',
   './icons/icon-maskable-192.png',
   './icons/icon-maskable-512.png',
-  './lib/jszip.min.js'
+  './lib/jszip.min.js',
+  './lib/pdf.min.js',
+  './lib/pdf.worker.min.js'
 ];
 
 self.addEventListener('install', (event) => {

@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v13';
+    const APP_VERSION = 'v14';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -15,6 +15,17 @@
     // passcode check and regardless of lock state.
     const versionBadgeEl = document.getElementById('versionBadge');
     if (versionBadgeEl) versionBadgeEl.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
+
+    // pdf.js worker — vendored locally at ./lib/pdf.worker.min.js, same
+    // package/version as ./lib/pdf.min.js loaded in index.html. Must stay
+    // in lockstep with that file — mismatched main/worker builds can fail
+    // in confusing ways. Used by openAttachment() to render PDFs onto
+    // <canvas> instead of relying on the browser's own PDF handling
+    // (which renders blank in an <iframe> on some platforms, e.g. Chrome
+    // on Android — see the removed fallback-button comment in git history).
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+    }
 
     // Returns YYYY-MM-DD in the browser's LOCAL timezone (not UTC).
     // toISOString() always returns UTC, which is off by a day for anyone
@@ -178,7 +189,6 @@
     const CRYPTO_CONFIG_KEY = 'family_health_tracker_v3_crypto';
     const ENC_PREFIX = 'ENCv1:';
     let cryptoKey = null; // in-memory CryptoKey; never persisted, cleared on lock/reload
-    let attachmentViewerPopup = null; // ref to the fallback "full-screen viewer" tab, so we can close it when the modal closes
 
     function getCryptoConfig() {
       try { return JSON.parse(localStorage.getItem(CRYPTO_CONFIG_KEY)) || null; } catch { return null; }
@@ -1438,6 +1448,14 @@
       renderAttachmentPreview();
     }
 
+    // Object URLs created by openAttachment() for the currently-open
+    // attachment (the download-button blob, plus any image-preview blob) -
+    // revoked in closeOverlay() when the modal closes. Tracked in an array
+    // rather than re-queried from the DOM because the PDF branch no longer
+    // puts a blob URL on any element (pdf.js renders bytes straight to
+    // <canvas>), so there's nothing left in the DOM to query for it.
+    let attachmentViewerObjectUrls = [];
+
     function dataUrlToBlob(dataUrl) {
       const [header, base64] = dataUrl.split(',');
       const mime = (header.match(/:(.*?);/) || [,'application/octet-stream'])[1];
@@ -1464,31 +1482,43 @@
       try {
         const blob = dataUrlToBlob(dataUrl);
         const url = URL.createObjectURL(blob);
+        attachmentViewerObjectUrls.push(url); // always revoked on close, whether or not it ends up displayed
         const isPdf = blob.type === 'application/pdf' || /\.pdf$/i.test(att.name || '');
         const body = document.getElementById('attachmentViewerBody');
         body.innerHTML = '';
-        attachmentViewerPopup = null; // reset for this open() call; set below only if the fallback button is used
         if (isPdf) {
-          const iframe = document.createElement('iframe');
-          iframe.src = url;
-          iframe.style.cssText = 'width:100%;height:70vh;border:0;';
-          body.appendChild(iframe);
-          // Chrome on Android (incl. installed PWAs) does not reliably render
-          // PDFs embedded in an <iframe>/<embed> - the iframe above can come up
-          // blank there even though the exact same blob renders fine in Chrome's
-          // own full-screen PDF viewer. Desktop/iOS Safari don't have this
-          // problem, but there's no reliable way to feature-detect "did the
-          // iframe actually render a PDF" from blob content, so we just always
-          // offer this fallback beneath it rather than guessing by platform.
-          const fallback = document.createElement('button');
-          fallback.type = 'button';
-          fallback.className = 'btn btn-secondary btn-sm';
-          fallback.style.cssText = 'margin-top:10px;';
-          fallback.textContent = 'PDF not showing above? Open in full-screen viewer';
-          fallback.addEventListener('click', () => {
-            attachmentViewerPopup = window.open(url, '_blank');
-          });
-          body.appendChild(fallback);
+          // Deliberately NOT an <iframe src="blob:...">: that hands the PDF to
+          // the browser/OS's own PDF plugin, which is inconsistent across
+          // platforms (e.g. Chrome on Android can render it blank even though
+          // the identical blob opens fine in Chrome's full-screen viewer, while
+          // desktop/iOS Safari are usually fine - there's no reliable way to
+          // feature-detect which behavior you'll get). Instead, pdf.js decodes
+          // the PDF in JS and renders each page onto its own <canvas>, so the
+          // result is identical on every platform and doesn't depend on
+          // whatever PDF handling the device happens to have. Also means PDF
+          // JavaScript/embedded actions are never executed - pdf.js only reads
+          // page content, it doesn't run scripts in the file.
+          body.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted,#666);">Loading PDF…</div>';
+          try {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+            body.innerHTML = '';
+            const containerWidth = body.clientWidth || 700;
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+              const page = await pdf.getPage(pageNum);
+              const unscaledViewport = page.getViewport({ scale: 1 });
+              const scale = Math.max(0.1, (containerWidth - 20) / unscaledViewport.width);
+              const viewport = page.getViewport({ scale });
+              const canvas = document.createElement('canvas');
+              canvas.width = viewport.width;
+              canvas.height = viewport.height;
+              canvas.style.cssText = 'display:block;max-width:100%;margin:0 auto 12px;box-shadow:0 1px 4px rgba(0,0,0,0.15);';
+              body.appendChild(canvas);
+              await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            }
+          } catch (pdfErr) {
+            body.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;">Could not preview this PDF: ' + escapeHtml(pdfErr.message) + '<br><br>Use "Download" below to save it and open it another way.</div>';
+          }
         } else {
           const img = document.createElement('img');
           img.src = url;
@@ -1501,7 +1531,7 @@
         dl.download = att.name || 'attachment';
         const modal = document.getElementById('attachmentViewerModal');
         modal.classList.add('active');
-        // Revoking the blob URL is handled centrally in closeOverlay() so it
+        // Revoking the blob URL(s) is handled centrally in closeOverlay() so it
         // still happens when closed via the [X] icon or the Esc key, not
         // just this button.
         document.getElementById('btnCloseAttachmentViewer').onclick = () => closeOverlay(modal);
@@ -4510,17 +4540,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (overlay.id === 'importPasscodeModal' && importPasscodeResolver) { importPasscodeResolver.resolve(null); importPasscodeResolver = null; }
       if (overlay.id === 'attachmentViewerModal') {
         const body = document.getElementById('attachmentViewerBody');
-        const media = body.querySelector('img, iframe');
-        if (media && media.src) URL.revokeObjectURL(media.src);
+        attachmentViewerObjectUrls.forEach(u => URL.revokeObjectURL(u));
+        attachmentViewerObjectUrls = [];
         body.innerHTML = '';
-        // Also close the fallback "full-screen viewer" tab if the user opened
-        // one and never closed it themselves. .closed check + try/catch guard
-        // against it already being closed manually, or a popup blocker having
-        // returned null from window.open() in the first place.
-        if (attachmentViewerPopup && !attachmentViewerPopup.closed) {
-          try { attachmentViewerPopup.close(); } catch { /* ignore */ }
-        }
-        attachmentViewerPopup = null;
       }
     }
     document.querySelectorAll('.modal-overlay').forEach(overlay => {
