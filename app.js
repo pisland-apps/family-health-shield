@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v14';
+    const APP_VERSION = 'v15';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -985,11 +985,13 @@
     }
 
     function selectMember(id) {
+      const wasOverview = currentMemberId === null; // only a real forward step if we're leaving the overview/welcome page - switching between two already-selected members doesn't add another level to unwind
       currentMemberId = id;
       currentTab = 'overview';
       renderMemberList();
       renderMain();
       closeSidebarOnMobile();
+      if (wasOverview) pushNavStep(); // so Back returns here to the overview instead of exiting the app
     }
 
     // ========== SIDEBAR TOGGLE (mobile) ==========
@@ -4559,6 +4561,89 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (e.key === 'Escape') {
         document.querySelectorAll('.modal-overlay.active').forEach(overlay => closeOverlay(overlay));
       }
+    });
+
+    // ===== Mobile/tablet hardware & gesture "Back" button =====
+    // This app is a single index.html with no routing, so there's normally
+    // nothing in browser history for the OS back button/gesture to step
+    // through - it falls straight through to closing the app. This block
+    // gives every "in-app step" (opening a modal - including the
+    // image/PDF attachment viewer - or drilling into a member's profile) a
+    // matching history entry, so Back instead undoes ONE such step at a
+    // time: close viewer/modal -> back to overview -> then, only once
+    // there's nothing left to unwind at the app level, an actual exit.
+    //
+    // navDepth counts how many of THESE entries are currently pushed and
+    // not yet consumed. It's what stops popNavStep() from ever calling
+    // history.back() with nothing of ours left to consume, which would
+    // otherwise navigate off the app entirely (e.g. to whatever page was
+    // open in this tab before, or closing an installed PWA one level too
+    // far).
+    let navDepth = 0;
+    let suppressNavPop = false;   // true only while handleBackNavigation() itself is closing something in response to a genuine Back press, so the observer below doesn't ALSO call history.back() for a step the browser is already consuming
+    let expectingEchoPopstate = false; // true only for the brief window between popNavStep() calling history.back() itself (e.g. because the [X] button or a Cancel button closed something) and the resulting popstate firing - without this, that echoed popstate would look identical to a genuine Back press and re-run handleBackNavigation(), incorrectly closing a second thing (e.g. also kicking back to the overview) for what was only one user action
+
+    function pushNavStep() {
+      navDepth++;
+      history.pushState({ familyHealthNavStep: navDepth }, '', location.href);
+    }
+
+    function popNavStep() {
+      if (navDepth > 0 && !suppressNavPop) {
+        navDepth--;
+        expectingEchoPopstate = true;
+        history.back();
+      }
+    }
+
+    function handleBackNavigation() {
+      const activeOverlay = document.querySelector('.modal-overlay.active');
+      if (activeOverlay) { closeOverlay(activeOverlay); return; }
+      if (currentMemberId !== null) { currentMemberId = null; currentTab = 'overview'; renderMemberList(); renderMain(); return; }
+      // Nothing left to unwind at the app level - do nothing further here;
+      // with navDepth already back at 0, the browser handles any
+      // subsequent Back press itself (normal exit/minimize behavior).
+    }
+
+    window.addEventListener('popstate', () => {
+      if (expectingEchoPopstate) {
+        // This popstate is just the async echo of our own popNavStep() ->
+        // history.back() call above - the thing it was closing is already
+        // closed and navDepth was already decremented there, so there's
+        // nothing further to do.
+        expectingEchoPopstate = false;
+        return;
+      }
+      // A genuine Back press (hardware button / edge swipe) - undo exactly
+      // one step ourselves.
+      if (navDepth > 0) navDepth--;
+      suppressNavPop = true;
+      handleBackNavigation();
+      // Let the synchronous DOM changes just made (which the
+      // MutationObserver below also reacts to) settle before re-arming,
+      // so that observer doesn't itself call history.back() for a step
+      // this popstate event already consumed.
+      setTimeout(() => { suppressNavPop = false; }, 0);
+    });
+
+
+    // Any `.modal-overlay` (including ones added after this point) is
+    // opened/closed purely by toggling its 'active' class - via
+    // closeOverlay() above, the auto-added [X] button, Escape, or each
+    // modal's own Cancel/Save buttons which toggle it directly. Observing
+    // that one class, rather than hooking every individual open/close call
+    // site, catches all of them (present and future) uniformly.
+    const navStepObserver = new MutationObserver((mutations) => {
+      for (const mut of mutations) {
+        const el = mut.target;
+        const isActive = el.classList.contains('active');
+        const wasActive = (mut.oldValue || '').split(' ').includes('active');
+        if (isActive && !wasActive) pushNavStep();
+        else if (!isActive && wasActive) popNavStep();
+      }
+    });
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+      navStepObserver.observe(overlay, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
     });
 
     // ===== PWA: Service Worker registration (offline support) =====
