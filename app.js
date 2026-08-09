@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v12';
+    const APP_VERSION = 'v13';
     const APP_VERSION_DATE = '2026-08-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -178,6 +178,7 @@
     const CRYPTO_CONFIG_KEY = 'family_health_tracker_v3_crypto';
     const ENC_PREFIX = 'ENCv1:';
     let cryptoKey = null; // in-memory CryptoKey; never persisted, cleared on lock/reload
+    let attachmentViewerPopup = null; // ref to the fallback "full-screen viewer" tab, so we can close it when the modal closes
 
     function getCryptoConfig() {
       try { return JSON.parse(localStorage.getItem(CRYPTO_CONFIG_KEY)) || null; } catch { return null; }
@@ -1466,6 +1467,7 @@
         const isPdf = blob.type === 'application/pdf' || /\.pdf$/i.test(att.name || '');
         const body = document.getElementById('attachmentViewerBody');
         body.innerHTML = '';
+        attachmentViewerPopup = null; // reset for this open() call; set below only if the fallback button is used
         if (isPdf) {
           const iframe = document.createElement('iframe');
           iframe.src = url;
@@ -1483,7 +1485,9 @@
           fallback.className = 'btn btn-secondary btn-sm';
           fallback.style.cssText = 'margin-top:10px;';
           fallback.textContent = 'PDF not showing above? Open in full-screen viewer';
-          fallback.addEventListener('click', () => window.open(url, '_blank'));
+          fallback.addEventListener('click', () => {
+            attachmentViewerPopup = window.open(url, '_blank');
+          });
           body.appendChild(fallback);
         } else {
           const img = document.createElement('img');
@@ -4509,6 +4513,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         const media = body.querySelector('img, iframe');
         if (media && media.src) URL.revokeObjectURL(media.src);
         body.innerHTML = '';
+        // Also close the fallback "full-screen viewer" tab if the user opened
+        // one and never closed it themselves. .closed check + try/catch guard
+        // against it already being closed manually, or a popup blocker having
+        // returned null from window.open() in the first place.
+        if (attachmentViewerPopup && !attachmentViewerPopup.closed) {
+          try { attachmentViewerPopup.close(); } catch { /* ignore */ }
+        }
+        attachmentViewerPopup = null;
       }
     }
     document.querySelectorAll('.modal-overlay').forEach(overlay => {
