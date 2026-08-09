@@ -20,7 +20,7 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -32,21 +32,21 @@ const APP_SHELL = [
   './icons/icon-512.png',
   './icons/icon-maskable-192.png',
   './icons/icon-maskable-512.png',
-  'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+  './lib/jszip.min.js'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(async (cache) => {
-      // Cache each file independently so one failure (offline on first
-      // install, or a CDN hiccup) doesn't abort caching the rest.
+      // Cache each file independently so one failure on first install
+      // doesn't abort caching the rest. All app-shell files (including
+      // lib/jszip.min.js) are same-origin now, so responses are always
+      // inspectable ('basic', not 'opaque').
       await Promise.all(APP_SHELL.map(async (url) => {
         try {
           const req = new Request(url, { cache: 'reload' });
           const res = await fetch(req);
-          // Cross-origin requests (the CDN script) come back as opaque
-          // responses - still cacheable, just not inspectable.
-          if (res && (res.ok || res.type === 'opaque')) {
+          if (res && res.ok) {
             await cache.put(url, res);
           }
         } catch (err) {
