@@ -8,7 +8,7 @@
 - 📦 Pack ZIP 备份(开启加密时,备份 JSON + `attachments/` 内所有文件均整体加密)
 - 📱 PWA:可安装到主屏幕、Service Worker 离线缓存、Web App Manifest
 
-所有数据(健康记录、保险单、附件)都只保存在**用户自己浏览器的 localStorage / IndexedDB** 里,没有任何后端服务器或云端同步 —— 这也是这个项目可以直接用 GitHub Pages 白嫖静态托管的原因。
+所有数据(健康记录、保险单、附件)都只保存在**用户自己浏览器的 localStorage / IndexedDB** 里,没有任何后端服务器或云端同步 —— 这也是这个项目可以直接用纯静态托管白嫖的原因(推荐 Cloudflare Pages,理由见下方部署章节)。
 
 ## 目录结构
 
@@ -18,6 +18,7 @@ family-health-shield/
 ├── app.js                   ← 主应用逻辑(原先内联在 index.html 里,现已拆成外部文件)
 ├── manifest.json            ← Web App Manifest(可安装为 PWA)
 ├── service-worker.js        ← 离线缓存(App Shell 预缓存 + cache-first)
+├── _headers                  ← Cloudflare Pages 自定义响应头(CSP frame-ancestors / X-Frame-Options 等,GitHub Pages 不支持,故需换托管平台)
 ├── icons/
 │   ├── icon-16.png / icon-32.png     ← 浏览器标签页图标
 │   ├── icon-180.png                  ← iOS "添加到主屏幕" 图标
@@ -41,14 +42,22 @@ git remote add origin https://github.com/<你的用户名>/<仓库名>.git
 git push -u origin main
 ```
 
-## 用 GitHub Pages 免费部署(推荐,天然 HTTPS,Service Worker 才能生效)
+## 用 Cloudflare Pages 免费部署(推荐 —— 天然 HTTPS,而且支持自定义响应头)
 
-1. 仓库页面 → **Settings → Pages**
-2. **Source** 选择 `Deploy from a branch`,Branch 选 `main` / `/(root)`,保存
-3. 等 1~2 分钟,访问 `https://<你的用户名>.github.io/<仓库名>/` 即可
-4. 手机浏览器打开该地址后,选择"添加到主屏幕"(iOS Safari)或浏览器会自动弹出"安装应用"提示(Android Chrome),即可像原生 App 一样使用,并支持离线打开
+这个项目存的是健康记录+保单这类敏感数据,所以选了支持自定义 HTTP 响应头的托管平台:仓库里的 `_headers` 文件能让 Cloudflare Pages 在每个响应上附加 `Content-Security-Policy: frame-ancestors 'none'` 和 `X-Frame-Options: DENY`,把点击劫持防护也补上(这一条 GitHub Pages 做不到,因为它不支持自定义响应头,见下方"安全说明")。
+
+1. 用 GitHub 账号登录 [Cloudflare Pages](https://pages.cloudflare.com/)
+2. **Create a project → Connect to Git**,选择这个仓库
+3. Build 设置全部留空/默认即可 —— 这是纯静态文件,没有构建步骤(Build command 留空,Output directory 填 `/` 或留空)
+4. 部署完成后会拿到一个 `https://<项目名>.pages.dev` 地址,之后每次 `git push` 都会自动重新部署
+5. (可选)Cloudflare Pages 项目设置里可以绑定自己的域名
+6. 手机浏览器打开该地址后,选择"添加到主屏幕"(iOS Safari)或浏览器会自动弹出"安装应用"提示(Android Chrome),即可像原生 App 一样使用,并支持离线打开
 
 > ⚠️ Service Worker 只在 **HTTPS** 或 `localhost` 下才会注册生效,直接双击打开本地 `index.html`(`file://` 协议)可以正常使用 App 本身,但离线缓存/PWA 安装功能不会生效 —— 这是浏览器的安全限制,不是 bug。本地调试可以用 `python3 -m http.server` 之类的方式起一个 `http://localhost` 服务器测试。
+
+### 备选:GitHub Pages(仅建议临时测试用,不建议长期存放这个 App)
+
+步骤和以前一样(仓库 **Settings → Pages** → `Deploy from a branch` → `main` / `/(root)`),依然能正常跑,**但 GitHub Pages 不支持自定义响应头,`_headers` 文件在这里不会生效**,也就是说部署在 GitHub Pages 上时点击劫持防护这一层是缺失的。仅建议用来快速验证改动,正式长期使用请部署到 Cloudflare Pages。
 
 ## 更新部署后如何让访客拿到最新版本
 
@@ -59,6 +68,8 @@ const CACHE_VERSION = 'v1';
 ```
 
 **每次你修改了 `index.html` / `manifest.json` / 图标等任何文件并重新 push 后,把这个版本号改一下**(比如改成 `'v2'`),否则老用户的浏览器会因为离线缓存而看到旧版本,直到缓存自然过期。
+
+（`_headers` 是个例外:它不在 `service-worker.js` 的 `APP_SHELL` 缓存列表里,是 Cloudflare 边缘节点直接读取生效的,单独改它不需要跟着改 `CACHE_VERSION`。)
 
 ## 修改了 `app.js` 之后
 
@@ -82,3 +93,4 @@ const CACHE_VERSION = 'v1';
 - 密码**没有找回机制**。忘记密码,已加密的附件和数据将无法恢复。
 - 指纹/Face ID 解锁是**逐设备**的便捷登录方式,底层仍然依赖同一把密码派生出的密钥——生物识别只是替你在本机安全地"记住并按下密码"这一步,并不是比密码更强的独立加密层,也不能跨设备使用。
 - 这是一个纯客户端应用,没有服务器,请自行确保设备本身的安全(锁屏、系统账户密码等),因为浏览器本地存储在设备层面通常没有额外保护。
+- 点击劫持防护:`_headers` 里的 `frame-ancestors 'none'` + `X-Frame-Options: DENY` 只有部署在 **Cloudflare Pages**(或其它支持自定义响应头的静态托管)上才会生效——这是 HTTP 响应头级别的保护,`_headers` 文件本身在 GitHub Pages 上会被直接忽略。

@@ -58,10 +58,15 @@
           - 这是 CSP 规范的限制，不是遗漏——frame-ancestors / sandbox 等指令
             通过 <meta http-equiv> 声明时会被浏览器直接忽略，只有通过 HTTP
             响应头（Content-Security-Policy 头）设置才生效。
-          - 如果需要防点击劫持，必须换一个能设自定义 HTTP 头的静态托管
-            （例如 Cloudflare Pages / Netlify 的 _headers 文件），GitHub Pages
-            本身不支持自定义响应头。这是本次改动已知但未解决的限制，留给
-            以后部署到支持自定义头的平台时再补。
+          - 2026-08-10 更新：已解决——项目改为部署到 Cloudflare Pages，
+            通过仓库根目录的 `_headers` 文件下发真正的 HTTP 响应头，
+            其中包含 `frame-ancestors 'none'` 以及 `X-Frame-Options: DENY`
+            作为旧浏览器的兜底。这个 <meta> CSP 和 `_headers` 里的 CSP
+            会被浏览器同时强制执行（取交集，更严格的那个生效），两边内容
+            保持一致即可，不会冲突。如果以后改了任一份 CSP 记得同步改
+            另一份。GitHub Pages 仍可用于快速本地演示/测试，但不再是
+            推荐的生产部署方式，因为它不支持自定义响应头，也就补不上
+            点击劫持防护这一块。
 
        5. img-src 放开了 data: 和 blob:：
           - data: 用于内置的 SVG favicon 以及附件缩略图（图片/PDF 都是先转成
