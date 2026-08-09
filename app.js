@@ -2794,6 +2794,7 @@
         return {
           id: raw.id ? String(raw.id) : (Date.now() + i).toString(),
           name: raw.name,
+          nameZh: raw.nameZh || '',
           gender: raw.gender || 'Male',
           birth: raw.birth || '',
           blood: raw.blood || 'Unknown',
