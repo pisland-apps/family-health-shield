@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v19';
+    const APP_VERSION = 'v20';
     const APP_VERSION_DATE = '2026-08-10';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -3910,6 +3910,12 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       insResetLedgerForm();
       insRenderLedgerList(p);
       document.getElementById('insLedgerModal').classList.add('active');
+      // Reopening should always start at the top, not wherever the scroll
+      // position happened to be left when the modal was last closed. The
+      // ".modal" box itself is the scrollable element (overflow-y: auto),
+      // not the inner list, so that's what needs resetting.
+      const modalBox = document.querySelector('#insLedgerModal .modal');
+      if (modalBox) modalBox.scrollTop = 0;
     }
     function insResetLedgerForm() {
       insEditingLedgerId = null;

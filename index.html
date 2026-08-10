@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-L/v4oNi2xlR7pZLzxCa9ol3WFhyRShQBH54OX9iZNK4=';
+    style-src 'self' 'sha256-QUn+0G1I6fmMyoVZR/wlCYhE3x32+JsJAx9xGN4uwDg=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -318,6 +318,10 @@
     .reminder-date { font-size: 12px; color: var(--text-secondary); }
 
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: center; justify-content: center; z-index: 100; }
+    /* Attachment viewer can be opened from inside another modal (e.g. the ledger
+       modal) - it must always render above whichever modal is already open,
+       regardless of each element's position in the HTML source order. */
+    #attachmentViewerModal { z-index: 200; }
     .modal-overlay.active { display: flex; }
     .modal { background: var(--surface); border-radius: var(--radius); width: 90%; max-width: 520px; max-height: 90vh; overflow-y: auto; padding: 24px; position: relative; }
     .modal-close-x { position: absolute; top: 14px; right: 14px; cursor: pointer; font-size: 18px; line-height: 1; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--text-secondary); z-index: 5; }
