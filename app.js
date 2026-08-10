@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v18';
+    const APP_VERSION = 'v19';
     const APP_VERSION_DATE = '2026-08-10';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -3940,7 +3940,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         return;
       }
       container.innerHTML = entries.map(l => `
-        <div class="s-952fb81a">
+        <div class="s-952fb81a s-ledger-row" data-ledger-row-id="${l.id}">
           <div>
             <div class="s-ea8a0de7">${l.type === 'payout' ? '💰' : '💸'} ${escapeHtml(l.date||'--')} <span class="s-5ea608c5">· ${escapeHtml(l.method||'--')}</span></div>
             ${l.notes ? `<div class="s-c16bedce">${escapeHtml(l.notes)}</div>` : ''}
@@ -3972,6 +3972,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         document.getElementById('insBtnCancelLedgerEdit').style.display = 'inline-block';
         insTempLedgerAttachments = l.attachments ? l.attachments.map(a => ({ ...a })) : [];
         insRenderLedgerAttachmentPreview();
+        // The edit form lives above the ledger list, so without this the user has to
+        // manually scroll up to find it -- especially painful with a long transaction list.
+        document.getElementById('insLedgerFormTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
       }));
       container.querySelectorAll('[data-ins-remove-ledger]').forEach(el => el.addEventListener('click', () => {
         if (!confirm('Delete this transaction? This cannot be undone.')) return;
@@ -3998,15 +4001,28 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         notes: document.getElementById('insLNotes').value.trim(),
         attachments: await persistAttachmentsToIdb(insTempLedgerAttachments)
       };
+      let savedLedgerId;
       if (insEditingLedgerId) {
         const l = p.ledger.find(x => x.id === insEditingLedgerId);
         Object.assign(l, data);
+        savedLedgerId = l.id;
       } else {
-        p.ledger.push(Object.assign({ id: insUid() }, data));
+        const newEntry = Object.assign({ id: insUid() }, data);
+        p.ledger.push(newEntry);
+        savedLedgerId = newEntry.id;
       }
       saveData();
       insResetLedgerForm();
       insRenderLedgerList(p); renderMain();
+      // Same problem in reverse: after saving, jump back down to the row that was just
+      // added/edited and flash it, instead of leaving the user to scroll and hunt for it
+      // to confirm the save actually took.
+      const savedRow = document.querySelector(`[data-ledger-row-id="${savedLedgerId}"]`);
+      if (savedRow) {
+        savedRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        savedRow.classList.add('s-ledger-flash');
+        setTimeout(() => savedRow.classList.remove('s-ledger-flash'), 1500);
+      }
     });
     document.getElementById('insBtnCancelLedgerEdit').addEventListener('click', insResetLedgerForm);
     document.getElementById('insBtnCloseLedger').addEventListener('click', () => document.getElementById('insLedgerModal').classList.remove('active'));

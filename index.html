@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-gWM9/uh57dSyJHooQwJDVBB7gLcFhgMcYqgqh7WqALQ=';
+    style-src 'self' 'sha256-L/v4oNi2xlR7pZLzxCa9ol3WFhyRShQBH54OX9iZNK4=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -552,6 +552,22 @@
        updateStorageMeter(), the insurance coverage form rows, and the insurance
        ledger amount color. */
     .s-hidden { display:none; }
+    /* All 8 passcode fields in this app (unlock screen, security settings, export/import)
+       intentionally use type="text" + this CSS mask instead of type="password". They're
+       local encryption passcodes, not website login credentials, but Chrome doesn't know
+       that -- it offers to save/autofill ANY <input type="password"> present anywhere on
+       the page, even without a <form>, and even for fields that are currently hidden in a
+       modal. With 8 such fields always sitting in the DOM, that was firing Chrome's "Save
+       password?" prompt on unrelated actions like Add Member. -webkit-text-security is the
+       standard workaround: masks the input visually like a password field without Chrome's
+       password-manager heuristics recognizing it as one. Works in Chrome/Safari/Edge; if a
+       browser doesn't support it (older Firefox), the text just shows in plain -- an
+       acceptable trade-off here since the only thing lost is shoulder-surfing protection on
+       an unsupported browser, not encryption strength (the actual encryption is unaffected;
+       this is purely a visual masking / browser-heuristic concern). */
+    .s-passcode-mask { -webkit-text-security: disc; text-security: disc; }
+    .s-ledger-row { transition: background-color 0.4s ease; }
+    .s-ledger-flash { background-color: var(--primary-light, #dbeafe) !important; }
     .s-quotafill { height:100%; border-radius:999px; }
     .s-ledger-payout { font-weight:700; color:var(--success); }
     .s-ledger-expense { font-weight:700; color:var(--text); }
@@ -573,7 +589,7 @@
       <h2 class="s-bdfc2dc5">Family Health & Shield is Locked</h2>
       <p class="s-02225414">Enter your passcode to unlock your data.</p>
       <div class="form-group">
-        <input type="password" class="form-input" id="appLockPasscodeInput" placeholder="Passcode">
+        <input type="text" class="form-input s-passcode-mask" id="appLockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
       <div id="appLockError" class="s-0100dc7f"></div>
       <button class="btn btn-primary s-8588e44d" id="btnAppLockUnlock">Unlock</button>
@@ -849,11 +865,11 @@
         </p>
         <div class="form-group">
           <label class="form-label">Create Passcode</label>
-          <input type="password" class="form-input" id="secPasscode1" placeholder="At least 6 characters">
+          <input type="text" class="form-input s-passcode-mask" id="secPasscode1" placeholder="At least 6 characters" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="form-group">
           <label class="form-label">Confirm Passcode</label>
-          <input type="password" class="form-input" id="secPasscode2" placeholder="Re-enter passcode">
+          <input type="text" class="form-input s-passcode-mask" id="secPasscode2" placeholder="Re-enter passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div id="secSetupError" class="s-e36c2361"></div>
         <button class="btn btn-primary btn-sm" id="btnEnableEncryption">Enable Encryption</button>
@@ -876,7 +892,7 @@
           <div id="bioEnrollBox" class="s-93b8ea5b">
             <p class="s-c2c1a4cf">Unlock with your device's Face ID / Touch ID / fingerprint instead of typing your passcode every time. Confirm your current passcode once to set this up on this device.</p>
             <div class="form-group">
-              <input type="password" class="form-input" id="bioConfirmPasscode" placeholder="Current passcode">
+              <input type="text" class="form-input s-passcode-mask" id="bioConfirmPasscode" placeholder="Current passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
             </div>
             <div id="bioSetupError" class="s-e36c2361"></div>
             <button class="btn btn-secondary btn-sm" id="btnEnableBiometric">Enable Biometric Unlock</button>
@@ -902,7 +918,7 @@
       <button class="btn btn-secondary s-50204300" id="btnBioUnlock">🫆 Unlock with Face ID / Fingerprint</button>
       <div id="bioUnlockDivider" class="s-79e8385f">or enter passcode</div>
       <div class="form-group">
-        <input type="password" class="form-input" id="unlockPasscodeInput" placeholder="Passcode">
+        <input type="text" class="form-input s-passcode-mask" id="unlockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
       <div id="unlockError" class="s-e36c2361"></div>
       <div class="modal-actions">
@@ -927,11 +943,11 @@
       <div id="exportPasscodeFields" class="s-93b8ea5b">
         <div class="form-group">
           <label class="form-label">Set a Passcode for This Backup</label>
-          <input type="password" class="form-input" id="exportPasscode1" placeholder="At least 6 characters">
+          <input type="text" class="form-input s-passcode-mask" id="exportPasscode1" placeholder="At least 6 characters" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="form-group">
           <label class="form-label">Confirm Passcode</label>
-          <input type="password" class="form-input" id="exportPasscode2" placeholder="Re-enter passcode">
+          <input type="text" class="form-input s-passcode-mask" id="exportPasscode2" placeholder="Re-enter passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <p class="s-c16bedce">This passcode is only for this file — remember it, it's not saved anywhere. You'll need it (and this exact file) to import it back later.</p>
       </div>
@@ -952,7 +968,7 @@
       <div class="modal-header">🔒 Encrypted Backup</div>
       <p class="s-d163f8c4">This backup file is encrypted. Enter the passcode it was created with.</p>
       <div class="form-group">
-        <input type="password" class="form-input" id="importPasscodeInput" placeholder="Passcode">
+        <input type="text" class="form-input s-passcode-mask" id="importPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
       <div id="importPasscodeError" class="s-e36c2361"></div>
       <div class="modal-actions">
