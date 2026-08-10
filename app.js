@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v16';
+    const APP_VERSION = 'v17';
     const APP_VERSION_DATE = '2026-08-10';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -683,12 +683,22 @@
           : `Estimated ~5MB cap for app data (browser quota API unavailable)`;
 
         el.innerHTML = `
-          <div style="text-align:left;">${appLine}</div>
-          <div style="height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin:5px 0;">
-            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:999px;"></div>
+          <div class="s-244a7f30">${appLine}</div>
+          <div class="s-2c4ad88d">
+            <div class="s-quotafill" data-quota-fill></div>
           </div>
-          <div style="text-align:left;">${quotaLine}</div>
+          <div class="s-244a7f30">${quotaLine}</div>
         `;
+        // width/color are per-load numeric values, so they're set as individual CSSOM
+        // properties here rather than baked into the template's HTML as style="..." --
+        // that keeps this CSP-safe under style-src without 'unsafe-inline' (assigning a
+        // single .style.<prop> is allowed; a literal style attribute or .style.cssText
+        // string is not).
+        const fillEl = el.querySelector('[data-quota-fill]');
+        if (fillEl) {
+          fillEl.style.width = pct + '%';
+          fillEl.style.background = barColor;
+        }
       } catch {
         el.innerHTML = '';
       }
@@ -950,7 +960,7 @@
       updateStorageMeter();
       const list = document.getElementById('memberList');
       if (members.length === 0) {
-        list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;">No members yet<br>Click below to add</div>';
+        list.innerHTML = '<div class="s-3d9b1e10">No members yet<br>Click below to add</div>';
         return;
       }
       list.innerHTML = members.map(m => {
@@ -960,7 +970,7 @@
             <div class="member-avatar">${escapeHtml(getAvatarChar(m))}</div>
             <div class="member-info">
               <div class="member-name">${escapeHtml(m.name)}</div>
-              ${m.nameZh ? `<div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(m.nameZh)}</div>` : ''}
+              ${m.nameZh ? `<div class="s-c16bedce">${escapeHtml(m.nameZh)}</div>` : ''}
               <div class="member-meta">${escapeHtml(m.gender)} &middot; ${age}y &middot; Type ${escapeHtml(m.blood)}</div>
             </div>
             <span class="member-delete" data-id="${m.id}" title="Delete member">&times;</span>
@@ -1019,9 +1029,9 @@
       if (!m) {
         main.innerHTML = `
           <div class="empty-state">
-            <div style="font-size: 48px; margin-bottom: 16px;">👨‍👩‍👧‍👦</div>
-            <h2 style="font-size: 20px; margin-bottom: 8px;">Welcome to Family Health & Shield</h2>
-            <p style="margin-bottom: 16px;">Select a family member from the left sidebar to view their health records</p>
+            <div class="s-441dff46">👨‍👩‍👧‍👦</div>
+            <h2 class="s-dbb46795">Welcome to Family Health & Shield</h2>
+            <p class="s-d3277930">Select a family member from the left sidebar to view their health records</p>
           </div>
         `;
         return;
@@ -1032,23 +1042,23 @@
       const bmi = calcBmi(m.height, latestVitals.weight);
 
       const bpRecords = m.records.filter(r => r.vitals?.systolic).sort((a,b) => new Date(a.date) - new Date(b.date));
-      const chartHtml = bpRecords.length > 1 ? renderBPChart(bpRecords) : '<p style="color:var(--text-secondary);text-align:center;padding:40px;">Record more BP data to see trends</p>';
+      const chartHtml = bpRecords.length > 1 ? renderBPChart(bpRecords) : '<p class="s-b9373de3">Record more BP data to see trends</p>';
 
       const reminders = generateReminders(m);
       insEnsureData(m);
 
       main.innerHTML = `
-        <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px;">
-          <div style="width:56px;height:56px;border-radius:50%;background:var(--primary);color:white;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;">${escapeHtml(m.name[0])}</div>
+        <div class="s-a251dbd6">
+          <div class="s-f18fd9a2">${escapeHtml(m.name[0])}</div>
           <div>
-            <h2 style="font-size:22px;font-weight:700;">${escapeHtml(m.name)}${m.nameZh ? ' <span style="font-weight:400;color:var(--text-secondary);">' + escapeHtml(m.nameZh) + '</span>' : ''} <span style="font-size:14px;font-weight:400;color:var(--text-secondary);">${escapeHtml(m.gender)} &middot; ${age}y</span></h2>
-            <div style="display:flex;gap:8px;margin-top:4px;">
-              <span class="tag tag-green" ${m.bloodTypeAttachment ? `id="btnViewBloodAttachment" style="cursor:pointer;" title="View attached blood type test report"` : ''}>Type ${escapeHtml(m.blood)}${m.bloodTypeAttachment ? ' 📎' : ''}</span>
+            <h2 class="s-738e228b">${escapeHtml(m.name)}${m.nameZh ? ' <span class="s-5ea608c5">' + escapeHtml(m.nameZh) + '</span>' : ''} <span class="s-605d40a3">${escapeHtml(m.gender)} &middot; ${age}y</span></h2>
+            <div class="s-da0fa578">
+              <span class="tag tag-green s-58aba575" ${m.bloodTypeAttachment ? `id="btnViewBloodAttachment" title="View attached blood type test report"` : ''}>Type ${escapeHtml(m.blood)}${m.bloodTypeAttachment ? ' 📎' : ''}</span>
               ${m.allergies !== 'None' && m.allergies ? `<span class="tag tag-red">⚠️ Allergy: ${escapeHtml(m.allergies)}</span>` : ''}
               ${bmi !== '--' ? `<span class="tag tag-yellow">BMI ${bmi}</span>` : ''}
             </div>
           </div>
-          <div style="margin-left:auto;display:flex;gap:8px;">
+          <div class="s-0cc925bc">
             <button class="btn btn-secondary btn-sm" id="btnEditMember">✏️ Edit Info</button>
             <button class="btn btn-danger btn-sm" id="btnEmergency">🚨 Emergency Card</button>
           </div>
@@ -1169,14 +1179,14 @@
           <div class="info-grid">
             <div class="info-item"><div class="info-label">Height</div><div class="info-value">${m.height || '--'} cm</div></div>
             <div class="info-item"><div class="info-label">Weight</div><div class="info-value">${latestVitals.weight || '--'} kg</div></div>
-            <div class="info-item"><div class="info-label">Blood Type</div><div class="info-value">${escapeHtml(m.blood)}${m.bloodTypeAttachment ? ` <span id="btnViewBloodAttachment2" style="cursor:pointer;font-size:13px;color:var(--primary);" title="View attached blood type test report">📎 view</span>` : ''}</div></div>
+            <div class="info-item"><div class="info-label">Blood Type</div><div class="info-value">${escapeHtml(m.blood)}${m.bloodTypeAttachment ? ` <span id="btnViewBloodAttachment2" title="View attached blood type test report" class="s-af9923da">📎 view</span>` : ''}</div></div>
             <div class="info-item"><div class="info-label">BMI</div><div class="info-value">${bmi}</div></div>
             <div class="info-item"><div class="info-label">Birth Date</div><div class="info-value">${escapeHtml(m.birth) || '--'}</div></div>
             <div class="info-item"><div class="info-label">Emergency</div><div class="info-value">${escapeHtml(m.emergency) || '--'}</div></div>
           </div>
-          <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+          <div class="s-72724f51">
             <div class="info-label">Medical History</div>
-            <div style="margin-top:6px;font-size:14px;line-height:1.6;">${escapeHtml(m.history) || 'No records'}</div>
+            <div class="s-828bc405">${escapeHtml(m.history) || 'No records'}</div>
           </div>
         </div>
 
@@ -1213,13 +1223,13 @@
                   <div class="reminder-date">${r.date}</div>
                 </div>
               </div>
-            `).join('') || '<p style="color:var(--text-secondary);">No reminders</p>'}
+            `).join('') || '<p class="s-9155c939">No reminders</p>'}
           </div>
         </div>
 
         <div class="card">
           <div class="card-title">📄 Reports</div>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          <div class="s-7137c2f6">
             <button class="btn btn-secondary btn-sm" data-report-type="summary" data-report-member="${m.id}">📋 Health Summary</button>
             <button class="btn btn-secondary btn-sm" data-report-type="vaccine" data-report-member="${m.id}">💉 Vaccine Record</button>
             <button class="btn btn-secondary btn-sm" data-report-type="medication" data-report-member="${m.id}">💊 Medication List</button>
@@ -1241,7 +1251,7 @@
               const color = r.type === 'Hospitalization' ? 'purple' : r.type === 'Illness' ? 'red' : r.type === 'Vaccine' ? 'green' : r.type === 'Medication' ? 'yellow' : 'primary';
               const icon = { 'Checkup':'🏥','Vaccine':'💉','Illness':'🤒','Hospitalization':'🚑','Medication':'💊','Lab Test':'🔬','Monitoring':'📊' }[r.type] || '📋';
               const attachmentsHtml = r.attachments?.length ? `
-                <div class="attachment-list" style="margin-top:8px;">
+                <div class="attachment-list s-d79ce2bc">
                   ${r.attachments.map((att, idx) => renderAttachmentItem(att, r.id, idx)).join('')}
                 </div>
               ` : '';
@@ -1249,11 +1259,11 @@
                 <div class="timeline-item">
                   <div class="timeline-dot ${color}"></div>
                   <div class="timeline-content">
-                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                    <div class="s-140c3f9b">
                       <div class="timeline-date">${escapeHtml(r.date)} &middot; ${icon} ${escapeHtml(r.type)}</div>
-                      <div style="display:flex;gap:4px;flex-shrink:0;">
-                        <span class="member-delete" data-edit-record="${r.id}" title="Edit record" style="opacity:1;">✏️</span>
-                        <span class="member-delete" data-delete-record="${r.id}" title="Delete record" style="opacity:1;">&times;</span>
+                      <div class="s-ef34e083">
+                        <span class="member-delete s-19e87f8e" data-edit-record="${r.id}" title="Edit record">✏️</span>
+                        <span class="member-delete s-19e87f8e" data-delete-record="${r.id}" title="Delete record">&times;</span>
                       </div>
                     </div>
                     <div class="timeline-title">${escapeHtml(r.title)}</div>
@@ -1307,11 +1317,11 @@
     function renderReminders(reminders, memberId) {
       return `
         <div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div class="card-title" style="margin-bottom:0;">⏰ All Reminders</div>
+          <div class="s-2447f692">
+            <div class="card-title s-a2d48c76">⏰ All Reminders</div>
             <button class="btn btn-primary btn-sm" data-open-reminder-modal="${memberId}">+ Add Reminder</button>
           </div>
-          <div class="reminder-list" style="margin-top:12px;">
+          <div class="reminder-list s-78f6f2c9">
             ${reminders.map(r => `
               <div class="reminder-item">
                 <div class="reminder-icon ${r.status}">${r.icon}</div>
@@ -1321,12 +1331,12 @@
                 </div>
                 <span class="tag ${r.status === 'overdue' ? 'tag-red' : r.status === 'upcoming' ? 'tag-yellow' : 'tag-green'}">${r.statusText}</span>
                 ${r.isCustom ? `
-                  <span class="member-delete" data-done-reminder="${r.id}" title="Mark done" style="opacity:1;">✔️</span>
-                  <span class="member-delete" data-edit-reminder="${r.id}" title="Edit" style="opacity:1;">✏️</span>
-                  <span class="member-delete" data-delete-reminder="${r.id}" title="Delete" style="opacity:1;">&times;</span>
+                  <span class="member-delete s-19e87f8e" data-done-reminder="${r.id}" title="Mark done">✔️</span>
+                  <span class="member-delete s-19e87f8e" data-edit-reminder="${r.id}" title="Edit">✏️</span>
+                  <span class="member-delete s-19e87f8e" data-delete-reminder="${r.id}" title="Delete">&times;</span>
                 ` : ''}
               </div>
-            `).join('') || '<p style="color:var(--text-secondary);">No reminders</p>'}
+            `).join('') || '<p class="s-9155c939">No reminders</p>'}
           </div>
         </div>
       `;
@@ -1500,7 +1510,7 @@
           // whatever PDF handling the device happens to have. Also means PDF
           // JavaScript/embedded actions are never executed - pdf.js only reads
           // page content, it doesn't run scripts in the file.
-          body.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted,#666);">Loading PDF…</div>';
+          body.innerHTML = '<div class="s-db2a3573">Loading PDF…</div>';
           try {
             const bytes = new Uint8Array(await blob.arrayBuffer());
             const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
@@ -1514,17 +1524,25 @@
               const canvas = document.createElement('canvas');
               canvas.width = viewport.width;
               canvas.height = viewport.height;
-              canvas.style.cssText = 'display:block;max-width:100%;margin:0 auto 12px;box-shadow:0 1px 4px rgba(0,0,0,0.15);';
+              // Individual property assignments here (not .style.cssText, which -- like a
+              // literal style="..." attribute -- needs style-src 'unsafe-inline'; setting
+              // each CSSOM property one at a time doesn't).
+              canvas.style.display = 'block';
+              canvas.style.maxWidth = '100%';
+              canvas.style.margin = '0 auto 12px';
+              canvas.style.boxShadow = '0 1px 4px rgba(0,0,0,0.15)';
               body.appendChild(canvas);
               await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
             }
           } catch (pdfErr) {
-            body.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;">Could not preview this PDF: ' + escapeHtml(pdfErr.message) + '<br><br>Use "Download" below to save it and open it another way.</div>';
+            body.innerHTML = '<div class="s-61908f99">Could not preview this PDF: ' + escapeHtml(pdfErr.message) + '<br><br>Use "Download" below to save it and open it another way.</div>';
           }
         } else {
           const img = document.createElement('img');
           img.src = url;
-          img.style.cssText = 'max-width:100%;max-height:70vh;display:block;';
+          img.style.maxWidth = '100%';
+          img.style.maxHeight = '70vh';
+          img.style.display = 'block';
           body.appendChild(img);
         }
         document.getElementById('attachmentViewerTitle').textContent = att.name || 'Attachment';
@@ -1639,7 +1657,7 @@
 
     function renderWeightChart(m) {
       const weightRecords = m.records.filter(r => r.vitals?.weight).sort((a,b) => new Date(a.date) - new Date(b.date));
-      if (weightRecords.length < 2) return '<p style="color:var(--text-secondary);text-align:center;padding:40px;">Record more weight data to see trends</p>';
+      if (weightRecords.length < 2) return '<p class="s-b9373de3">Record more weight data to see trends</p>';
 
       const w = 600, h = 200, pad = 40;
       const weights = weightRecords.map(r => r.vitals.weight);
@@ -2105,17 +2123,17 @@
         attContainer.innerHTML = '';
       } else {
         attContainer.innerHTML = `
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <div style="font-size:13px;font-weight:600;">Include attachments:</div>
-            <div style="display:flex;gap:8px;">
-              <span class="attachment-remove" id="btnSelectAllAtt" style="color:var(--primary);">Select All</span>
+          <div class="s-33a0a182">
+            <div class="s-a043ed1c">Include attachments:</div>
+            <div class="s-1952d609">
+              <span class="attachment-remove s-cf36fb90" id="btnSelectAllAtt">Select All</span>
               <span class="attachment-remove" id="btnSelectNoneAtt">Select None</span>
             </div>
           </div>
-          <div class="attachment-list" style="max-height:260px;overflow-y:auto;">
+          <div class="attachment-list s-c6889a29">
             ${attachments.map(({ key, record, att }) => `
-              <label class="attachment-item" style="cursor:pointer;">
-                <input type="checkbox" class="report-att-checkbox" data-key="${escapeHtml(key)}" checked style="margin-right:10px;flex-shrink:0;">
+              <label class="attachment-item s-58aba575">
+                <input type="checkbox" class="report-att-checkbox s-ec1740b6" data-key="${escapeHtml(key)}" checked>
                 <div class="attachment-thumb">
                   ${att.type === 'image' && (att.data || att.thumb) ? `<img src="${att.data || att.thumb}" alt="">` : `<span>📄</span>`}
                 </div>
@@ -2168,18 +2186,18 @@
           const src = await resolveAttachmentData(att);
           if (!src) continue;
           rows += `
-            <div style="margin:16px 0;break-inside:avoid;">
-              <div style="font-size:12px;color:#666;margin-bottom:6px;"><strong>${escapeHtml(r.title)}</strong> &middot; ${escapeHtml(r.date)} &middot; ${escapeHtml(att.name)}</div>
+            <div class="s-7b14e8e7">
+              <div class="s-67c7d753"><strong>${escapeHtml(r.title)}</strong> &middot; ${escapeHtml(r.date)} &middot; ${escapeHtml(att.name)}</div>
               ${att.type === 'image'
-                ? `<img src="${src}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;">`
-                : `<embed src="${src}" type="application/pdf" style="width:100%;height:600px;border:1px solid #e5e7eb;border-radius:6px;">`}
+                ? `<img src="${src}" class="s-12e8d0af">`
+                : `<embed src="${src}" type="application/pdf" class="s-00ce6876">`}
             </div>`;
         }
       }
       if (!rows) return '';
       return `
-        <div style="page-break-before:always;margin-top:20px;">
-          <h2 style="color:#3b82f6;border-bottom:2px solid #3b82f6;padding-bottom:8px;">📎 Attachments</h2>
+        <div class="s-821d65a9">
+          <h2 class="s-43ba3b92">📎 Attachments</h2>
           ${rows}
         </div>`;
     }
@@ -2192,9 +2210,19 @@
       const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
       const bloodAttData = await resolveAttachmentData(m.bloodTypeAttachment);
 
+      // Print-report popups (this one and the 8 others like it, e.g. printVaccineRecord,
+      // printMedicationList, insOpenPrintWindow) are deliberately NOT covered by the main
+      // app's tightened style-src/script-src — they're static, ephemeral, same-origin popup
+      // documents (not the encrypted-data app shell), so each gets its own explicit CSP meta
+      // tag below rather than silently relying on the main document's policy. Kept permissive
+      // for exactly what these pages use: inline <style> for the print layout, an inline
+      // onclick/window.onload for the print button/auto-print, and data:/blob: <img>/<embed>
+      // for decrypted attachment previews. connect-src/default-src stay locked to 'none' so
+      // nothing on this page can make a network request even if something were ever injected.
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Emergency Card - ${escapeHtml(m.name)}</title>
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: 0 auto; }
           .card { border: 3px solid #dc2626; border-radius: 12px; padding: 20px; }
@@ -2249,13 +2277,15 @@
           <td>${escapeHtml(r.date)}</td>
           <td>${escapeHtml(r.type)}</td>
           <td>${escapeHtml(r.title)}</td>
-          <td style="white-space:pre-wrap;">${escapeHtml(r.details) || '-'}</td>
+          <td class="s-5c9fd965">${escapeHtml(r.details) || '-'}</td>
         </tr>
       `).join('');
 
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Health Summary - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #0d9488; border-bottom: 3px solid #0d9488; padding-bottom: 10px; }
@@ -2327,7 +2357,7 @@
           <td>${i + 1}</td>
           <td>${escapeHtml(v.title)}</td>
           <td>${escapeHtml(v.date)}</td>
-          <td style="white-space:pre-wrap;">${escapeHtml(v.details) || '-'}</td>
+          <td class="s-5c9fd965">${escapeHtml(v.details) || '-'}</td>
           <td>${escapeHtml((v.tags || []).join(', ')) || '-'}</td>
         </tr>
       `).join('');
@@ -2336,6 +2366,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Vaccine Record - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #10b981; border-bottom: 3px solid #10b981; padding-bottom: 10px; }
@@ -2381,7 +2413,7 @@
         <tr>
           <td>${escapeHtml(med.title)}</td>
           <td>${escapeHtml(med.date)}</td>
-          <td style="white-space:pre-wrap;">${escapeHtml(med.details) || '-'}</td>
+          <td class="s-5c9fd965">${escapeHtml(med.details) || '-'}</td>
           <td>${escapeHtml((med.tags || []).join(', ')) || '-'}</td>
         </tr>
       `).join('');
@@ -2390,6 +2422,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Medication List - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #f59e0b; border-bottom: 3px solid #f59e0b; padding-bottom: 10px; }
@@ -2449,6 +2483,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Lab Results - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 900px; margin: 0 auto; color: #333; }
           h1 { color: #8b5cf6; border-bottom: 3px solid #8b5cf6; padding-bottom: 10px; }
@@ -2520,6 +2556,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>BP Log - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #ef4444; border-bottom: 3px solid #ef4444; padding-bottom: 10px; }
@@ -2590,6 +2628,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Growth Chart - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #3b82f6; border-bottom: 3px solid #3b82f6; padding-bottom: 10px; }
@@ -2653,6 +2693,8 @@
       const printWindow = window.open('', '_blank');
       printWindow.document.write(`
         <html><head><title>Annual Report - ${escapeHtml(m.name)}</title>
+        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
           h1 { color: #0d9488; border-bottom: 3px solid #0d9488; padding-bottom: 10px; }
@@ -3324,7 +3366,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       insEnsureData(m);
       const reminders = insGenerateReminders(m);
       return `
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <div class="s-10cf5d38">
           <button class="btn btn-secondary btn-sm" id="insBtnAddClaim">+ Add Claim</button>
         </div>
         <div class="tabs">
@@ -3376,8 +3418,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const hasAssets = Object.keys(assetByType).length > 0;
 
       return `
-        <div class="card" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-          <div style="font-size:13px;color:var(--text-secondary);">Generate a printable summary of this family member's insurance records.</div>
+        <div class="card s-81f3194f">
+          <div class="s-d12fd7e2">Generate a printable summary of this family member's insurance records.</div>
           <button class="btn btn-primary btn-sm" id="insBtnOpenReport">🖨️ View / Print Report</button>
         </div>
         <div class="card">
@@ -3392,33 +3434,33 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         <div class="card">
           <div class="card-title">🛡️ Total Insured — ${insFmtMoney(totalInsured)}</div>
           ${Object.keys(insuredByType).length ? Object.entries(insuredByType).map(([type, amt]) => `
-            <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
-              <span>${escapeHtml(type)}</span><span style="font-weight:600;">${insFmtMoney(amt)}</span>
-            </div>`).join('') : '<p style="color:var(--text-secondary);font-size:13px;">No sum insured recorded on active policies yet.</p>'}
+            <div class="s-5911b194">
+              <span>${escapeHtml(type)}</span><span class="s-a5d2baa1">${insFmtMoney(amt)}</span>
+            </div>`).join('') : '<p class="s-51f2817c">No sum insured recorded on active policies yet.</p>'}
         </div>
         ${hasAssets ? `
         <div class="card">
           <div class="card-title">🏠 Property & Asset Insured — ${insFmtMoney(totalAssetInsured)}</div>
           ${Object.entries(assetByType).map(([type, amt]) => `
-            <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
-              <span>${escapeHtml(type)}</span><span style="font-weight:600;">${insFmtMoney(amt)}</span>
+            <div class="s-5911b194">
+              <span>${escapeHtml(type)}</span><span class="s-a5d2baa1">${insFmtMoney(amt)}</span>
             </div>`).join('')}
         </div>` : ''}
         ${hasMedical ? `
         <div class="card">
           <div class="card-title">🏥 Health/Medical Limits</div>
           <div class="stats-grid">
-            <div class="stat-box"><div class="stat-value" style="font-size:18px;">${insFmtMoney(totalMedicalAnnualLimit)}</div><div class="stat-label">Total Annual Limit</div></div>
-            <div class="stat-box"><div class="stat-value" style="font-size:18px;">${insFmtMoney(totalMedicalLifetimeRemaining)}</div><div class="stat-label">Total Lifetime Limit Remaining</div></div>
+            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalMedicalAnnualLimit)}</div><div class="stat-label">Total Annual Limit</div></div>
+            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalMedicalLifetimeRemaining)}</div><div class="stat-label">Total Lifetime Limit Remaining</div></div>
           </div>
         </div>` : ''}
         <div class="card">
           <div class="card-title">⏰ Upcoming Reminders</div>
-          ${reminders.slice(0,4).length ? insRenderReminderListHtml(reminders.slice(0,4)) : '<p style="color:var(--text-secondary);font-size:13px;">Nothing due within the next 60 days.</p>'}
+          ${reminders.slice(0,4).length ? insRenderReminderListHtml(reminders.slice(0,4)) : '<p class="s-51f2817c">Nothing due within the next 60 days.</p>'}
         </div>
         <div class="card">
           <div class="card-title">🧾 Recent Claims</div>
-          ${totalClaims ? m.insurance.claims.slice(0,3).map(c => insRenderClaimSummaryLine(m,c)).join('') : '<p style="color:var(--text-secondary);font-size:13px;">No claims filed yet.</p>'}
+          ${totalClaims ? m.insurance.claims.slice(0,3).map(c => insRenderClaimSummaryLine(m,c)).join('') : '<p class="s-51f2817c">No claims filed yet.</p>'}
         </div>
       `;
     }
@@ -3426,7 +3468,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insRenderClaimSummaryLine(m, c) {
       const p = m.insurance.policies.find(x => x.id === c.policyId);
       const cov = p ? (p.coverages||[]).find(x => x.id === c.coverageId) : null;
-      return `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+      return `<div class="s-b7fd2bd9">
         <span>${escapeHtml(cov ? insCoverageLabel(cov) : (p ? insPolicyTypeSummary(p) : 'Unknown policy'))} ${p && p.provider ? '— ' + escapeHtml(p.provider) : ''}</span>
         <span>${escapeHtml(c.date||'')} · ${escapeHtml(c.status)}</span>
       </div>`;
@@ -3437,7 +3479,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       return `
         <div class="card">
           <div class="card-title">📄 Policies</div>
-          ${active.length ? active.map(p => insRenderPolicyCard(m, p, false)).join('') : '<p style="color:var(--text-secondary);font-size:13px;">No active policies yet. Click "+ Add Policy" above.</p>'}
+          ${active.length ? active.map(p => insRenderPolicyCard(m, p, false)).join('') : '<p class="s-51f2817c">No active policies yet. Click "+ Add Policy" above.</p>'}
         </div>
       `;
     }
@@ -3447,8 +3489,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       return `
         <div class="card">
           <div class="card-title">🚫 Discontinued / Terminated Policies</div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">Kept separately for record-keeping — excluded from premium, insured, and reminder totals.</div>
-          ${discontinued.length ? discontinued.map(p => insRenderPolicyCard(m, p, true)).join('') : '<p style="color:var(--text-secondary);font-size:13px;">No discontinued or terminated policies.</p>'}
+          <div class="s-06d0d891">Kept separately for record-keeping — excluded from premium, insured, and reminder totals.</div>
+          ${discontinued.length ? discontinued.map(p => insRenderPolicyCard(m, p, true)).join('') : '<p class="s-51f2817c">No discontinued or terminated policies.</p>'}
         </div>
       `;
     }
@@ -3465,9 +3507,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="policy-top">
             <div>
               <div class="policy-title">${p.provider ? escapeHtml(p.provider) : 'Policy'}</div>
-              <div class="policy-sub">${escapeHtml(p.number || 'No policy number')} <span style="opacity:0.75;">· ${escapeHtml(insPolicyTypeSummary(p))}</span></div>
+              <div class="policy-sub">${escapeHtml(p.number || 'No policy number')} <span class="s-6a87be61">· ${escapeHtml(insPolicyTypeSummary(p))}</span></div>
             </div>
-            <div style="display:flex;align-items:center;gap:8px;">
+            <div class="s-4ca7474c">
               ${inDiscontinuedTab ? '<span class="tag tag-gray">🚫 Discontinued</span>' : `<span class="tag ${tagClass}">${tagText}</span>`}
               <div class="policy-actions">
                 ${inDiscontinuedTab ? `<span data-ins-reactivate-policy="${p.id}" title="Reactivate">🔄</span>` : ''}
@@ -3478,15 +3520,15 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           </div>
           <div class="policy-grid">
             <div><div class="policy-field-label">Premium</div><div class="policy-field-value">${insFmtMoney(p.premium)} / ${escapeHtml(p.frequency)}</div></div>
-            <div><div class="policy-field-label">Start</div><div class="policy-field-value">${escapeHtml(p.start || '--')}${p.start && insAgeAtDate(m.birth, p.start) !== null ? ` <span style="font-weight:400;color:var(--text-secondary);font-size:12px;">(age ${insAgeAtDate(m.birth, p.start)})</span>` : ''}</div></div>
-            <div><div class="policy-field-label">Expiry</div><div class="policy-field-value">${escapeHtml(p.expiry || '--')}${p.expiry && insAgeAtDate(m.birth, p.expiry) !== null ? ` <span style="font-weight:400;color:var(--text-secondary);font-size:12px;">(age ${insAgeAtDate(m.birth, p.expiry)})</span>` : ''}</div></div>
+            <div><div class="policy-field-label">Start</div><div class="policy-field-value">${escapeHtml(p.start || '--')}${p.start && insAgeAtDate(m.birth, p.start) !== null ? ` <span class="s-fb01568b">(age ${insAgeAtDate(m.birth, p.start)})</span>` : ''}</div></div>
+            <div><div class="policy-field-label">Expiry</div><div class="policy-field-value">${escapeHtml(p.expiry || '--')}${p.expiry && insAgeAtDate(m.birth, p.expiry) !== null ? ` <span class="s-fb01568b">(age ${insAgeAtDate(m.birth, p.expiry)})</span>` : ''}</div></div>
           </div>
-          ${coverages.length ? `<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">${coverages.map(c => insRenderCoverageSummary(m, p, c)).join('')}</div>` : '<p style="margin-top:10px;font-size:12px;color:var(--text-secondary);">No coverage details added yet — click ✏️ to add.</p>'}
-          ${payout ? `<div style="margin-top:10px;background:var(--primary-light);border-radius:8px;padding:8px 12px;font-size:13px;">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} · next payout ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</div>` : ''}
-          ${p.premiumPaidByBonus ? `<div style="margin-top:10px;background:var(--warning-light);border-radius:8px;padding:8px 12px;font-size:13px;">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</div>` : ''}
-          ${(p.attachments && p.attachments.length) ? `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;">${p.attachments.map((att, idx) => `<span class="tag tag-gray" style="cursor:pointer;" data-ins-open-attachment="${p.id}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
-          ${p.notes ? `<div style="margin-top:10px;font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">${escapeHtml(p.notes)}</div>` : ''}
-          ${(p.riders && p.riders.length) ? `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;">${p.riders.map(r => {
+          ${coverages.length ? `<div class="s-097e6af4">${coverages.map(c => insRenderCoverageSummary(m, p, c)).join('')}</div>` : '<p class="s-e1b40251">No coverage details added yet — click ✏️ to add.</p>'}
+          ${payout ? `<div class="s-406b76fd">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} · next payout ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</div>` : ''}
+          ${p.premiumPaidByBonus ? `<div class="s-e6bec453">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</div>` : ''}
+          ${(p.attachments && p.attachments.length) ? `<div class="s-eae4831c">${p.attachments.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${p.id}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+          ${p.notes ? `<div class="s-ca2edd98">${escapeHtml(p.notes)}</div>` : ''}
+          ${(p.riders && p.riders.length) ? `<div class="s-eae4831c">${p.riders.map(r => {
             const rd = insDaysUntil(r.dueDate);
             const isExpired = rd !== null && rd < 0;
             const rc = rd === null ? 'tag-gray' : isExpired ? 'tag-red' : rd <= 30 ? 'tag-yellow' : 'tag-green';
@@ -3496,9 +3538,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
               : `${escapeHtml(r.description)}${r.dueDate ? ' · ' + escapeHtml(r.dueDate) : ''}`;
             return `<span class="tag ${rc}" title="${isExpired ? 'Expired on' : 'Due'} ${escapeHtml(r.dueDate||'--')}">${icon} ${label}</span>`;
           }).join('')}</div>` : ''}
-          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <div class="s-79744520">
             <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${p.id}">📒 Ledger (${(p.ledger||[]).length})</button>
-            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${p.id}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span style="cursor:pointer;font-size:12px;color:var(--text-secondary);text-decoration:underline;" data-ins-open-surrender="${p.id}">+ Track Surrender Value</span>`}
+            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${p.id}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span data-ins-open-surrender="${p.id}" class="s-41b07b38">+ Track Surrender Value</span>`}
             <button class="btn btn-secondary btn-sm" data-ins-open-report="${p.id}">🖨️ View / Print</button>
           </div>
         </div>
@@ -3513,18 +3555,18 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const covD = c.expiry ? insDaysUntil(c.expiry) : null;
       const covTagClass = covD === null ? '' : covD < 0 ? 'tag-red' : covD <= 30 ? 'tag-yellow' : 'tag-green';
       return `
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+        <div class="s-30ddb801">
+          <div class="s-afb018e5">
             <span class="tag tag-gray">${escapeHtml(insCoverageLabel(c))}${c.reducing ? ' 📉 Reducing' : ''}</span>
-            ${currentSum ? `<span style="font-weight:700;font-size:13px;">${insFmtMoney(currentSum)}</span>` : ''}
+            ${currentSum ? `<span class="s-c0ec2360">${insFmtMoney(currentSum)}</span>` : ''}
           </div>
-          ${c.expiry ? `<div style="margin-top:6px;"><span class="tag ${covTagClass}" title="This coverage's own expiry differs from the policy's overall expiry">🗓️ Expires ${escapeHtml(c.expiry)}</span></div>` : ''}
+          ${c.expiry ? `<div class="s-ff6eee77"><span class="tag ${covTagClass}" title="This coverage's own expiry differs from the policy's overall expiry">🗓️ Expires ${escapeHtml(c.expiry)}</span></div>` : ''}
           ${isMedical && (c.lifetimeLimit || c.annualLimit) ? `
-          <div class="policy-grid" style="margin-top:8px;">
+          <div class="policy-grid s-d79ce2bc">
             ${c.annualLimit ? `<div><div class="policy-field-label">Annual Limit</div><div class="policy-field-value">${insFmtMoney(c.annualLimit)}</div></div>` : ''}
-            ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime)} <span style="font-weight:400;color:var(--text-secondary);font-size:11px;">/ ${insFmtMoney(c.lifetimeLimit)}</span></div></div>` : ''}
+            ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime)} <span class="s-5594ca44">/ ${insFmtMoney(c.lifetimeLimit)}</span></div></div>` : ''}
           </div>` : ''}
-          ${c.reducing ? `<div style="margin-top:8px;"><span style="cursor:pointer;font-size:12px;color:var(--primary);" data-ins-open-sumhistory="${p.id}" data-ins-cov-id="${c.id}">📉 View / Update Sum Insured History (${(c.sumInsuredHistory||[]).length})</span></div>` : ''}
+          ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${p.id}" data-ins-cov-id="${c.id}" class="s-c0623ab3">📉 View / Update Sum Insured History (${(c.sumInsuredHistory||[]).length})</span></div>` : ''}
         </div>
       `;
     }
@@ -3533,7 +3575,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       return `
         <div class="card">
           <div class="card-title">🧾 Claims</div>
-          ${m.insurance.claims.length ? m.insurance.claims.map(c => insRenderClaimCard(m, c)).join('') : '<p style="color:var(--text-secondary);font-size:13px;">No claims filed yet.</p>'}
+          ${m.insurance.claims.length ? m.insurance.claims.map(c => insRenderClaimCard(m, c)).join('') : '<p class="s-51f2817c">No claims filed yet.</p>'}
         </div>
       `;
     }
@@ -3549,7 +3591,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
               <div class="policy-title">${escapeHtml(label)}${p && p.provider ? ' — ' + escapeHtml(p.provider) : ''}</div>
               <div class="policy-sub">Filed ${escapeHtml(c.date || '--')}${p ? ' · ' + escapeHtml(p.number || '') : ''}</div>
             </div>
-            <div style="display:flex;align-items:center;gap:8px;">
+            <div class="s-4ca7474c">
               <span class="tag ${insStatusTagClass(c.status)}">${escapeHtml(c.status)}</span>
               <div class="policy-actions">
                 <span data-ins-edit-claim="${c.id}">✏️</span>
@@ -3561,13 +3603,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             <div><div class="policy-field-label">Claimed</div><div class="policy-field-value">${insFmtMoney(c.amountClaimed)}</div></div>
             <div><div class="policy-field-label">Paid Out</div><div class="policy-field-value">${insFmtMoney(c.amountPaid)}</div></div>
           </div>
-          ${c.details ? `<div style="margin-top:10px;font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">${escapeHtml(c.details)}</div>` : ''}
+          ${c.details ? `<div class="s-ca2edd98">${escapeHtml(c.details)}</div>` : ''}
         </div>
       `;
     }
 
     function insRenderRemindersTab(reminders) {
-      return `<div class="card"><div class="card-title">⏰ All Reminders</div><div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Showing items due within 60 days (including overdue).</div>${reminders.length ? insRenderReminderListHtml(reminders) : '<p style="color:var(--text-secondary);font-size:13px;">Nothing due within the next 60 days.</p>'}</div>`;
+      return `<div class="card"><div class="card-title">⏰ All Reminders</div><div class="s-afed93ca">Showing items due within 60 days (including overdue).</div>${reminders.length ? insRenderReminderListHtml(reminders) : '<p class="s-51f2817c">Nothing due within the next 60 days.</p>'}</div>`;
     }
 
     // ===== Bind all insurance interactive elements — called at the end of host's renderMain() =====
@@ -3667,26 +3709,26 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insRenderCoverageRows() {
       const container = document.getElementById('insCoveragesList');
       container.innerHTML = insTempCoverages.map((c, idx) => `
-        <div style="background:var(--bg);border-radius:8px;padding:10px;" data-ins-coverage-row="${idx}">
+        <div data-ins-coverage-row="${idx}" class="s-a4bf86ef">
           <div class="form-row">
             <select class="form-select" data-ins-cov-type="${idx}">${insCoverageTypeOptionsHtml(c.type)}</select>
             <input class="form-input" type="number" placeholder="Sum Insured" value="${escapeHtml(c.sumInsured ?? '')}" data-ins-cov-sum="${idx}">
           </div>
-          <div data-ins-cov-customlabel-row="${idx}" style="margin-top:8px;display:${c.type === 'Other' ? 'block' : 'none'};">
+          <div data-ins-cov-customlabel-row="${idx}" class="s-d79ce2bc ${c.type === 'Other' ? '' : 's-hidden'}">
             <input class="form-input" placeholder="Name this coverage (e.g. Pet, Home Contents)" value="${escapeHtml(c.customLabel ?? '')}" data-ins-cov-customlabel="${idx}">
           </div>
-          <div class="form-row" data-ins-cov-limit-row="${idx}" style="margin-top:8px;display:${c.type === 'Health/Medical' ? 'grid' : 'none'};">
+          <div class="form-row s-d79ce2bc ${c.type === 'Health/Medical' ? '' : 's-hidden'}" data-ins-cov-limit-row="${idx}">
             <input class="form-input" type="number" placeholder="Lifetime Limit" value="${escapeHtml(c.lifetimeLimit ?? '')}" data-ins-cov-lifetime="${idx}">
             <input class="form-input" type="number" placeholder="Annual Limit" value="${escapeHtml(c.annualLimit ?? '')}" data-ins-cov-annual="${idx}">
           </div>
-          <div style="margin-top:8px;">
-            <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">Coverage Expiry (only if different from the policy's overall expiry above)</label>
+          <div class="s-d79ce2bc">
+            <label class="s-e14e9e2a">Coverage Expiry (only if different from the policy's overall expiry above)</label>
             <input class="form-input" type="date" value="${escapeHtml(c.expiry ?? '')}" data-ins-cov-expiry="${idx}">
           </div>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);margin-top:8px;cursor:pointer;">
-            <input type="checkbox" data-ins-cov-reducing="${idx}" ${c.reducing ? 'checked' : ''} style="width:auto;"> Reducing Term (sum insured decreases each policy year — record actual amounts via History after saving)
+          <label class="s-7148c525">
+            <input type="checkbox" data-ins-cov-reducing="${idx}" ${c.reducing ? 'checked' : ''} class="s-d3b60f07"> Reducing Term (sum insured decreases each policy year — record actual amounts via History after saving)
           </label>
-          ${insTempCoverages.length > 1 ? `<div style="text-align:right;margin-top:6px;"><span style="cursor:pointer;color:var(--danger);font-size:12px;" data-ins-cov-remove="${idx}">🗑️ Remove Coverage</span></div>` : ''}
+          ${insTempCoverages.length > 1 ? `<div class="s-b6396cf3"><span data-ins-cov-remove="${idx}" class="s-03228cf2">🗑️ Remove Coverage</span></div>` : ''}
         </div>
       `).join('');
       container.querySelectorAll('[data-ins-cov-type]').forEach(el => el.addEventListener('change', () => {
@@ -3716,14 +3758,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insRenderRidersRows() {
       const container = document.getElementById('insRidersList');
       if (!insTempRiders.length) {
-        container.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);">No riders added. Some policies have more than one rider, each with its own due date — click "+ Add Rider" below.</div>';
+        container.innerHTML = '<div class="s-c16bedce">No riders added. Some policies have more than one rider, each with its own due date — click "+ Add Rider" below.</div>';
         return;
       }
       container.innerHTML = insTempRiders.map((r, idx) => `
-        <div style="display:flex;gap:8px;align-items:center;" data-ins-rider-row="${idx}">
-          <input class="form-input" style="flex:2;" placeholder="Rider description" value="${escapeHtml(r.description||'')}" data-ins-rider-desc="${idx}">
-          <input class="form-input" style="flex:1;" type="date" value="${escapeHtml(r.dueDate||'')}" data-ins-rider-date="${idx}">
-          <span style="cursor:pointer;padding:6px 8px;color:var(--danger);" data-ins-rider-remove="${idx}">🗑️</span>
+        <div data-ins-rider-row="${idx}" class="s-63e98485">
+          <input class="form-input s-ba5c496b" placeholder="Rider description" value="${escapeHtml(r.description||'')}" data-ins-rider-desc="${idx}">
+          <input class="form-input s-d5e8c5f3" type="date" value="${escapeHtml(r.dueDate||'')}" data-ins-rider-date="${idx}">
+          <span data-ins-rider-remove="${idx}" class="s-af1f4270">🗑️</span>
         </div>
       `).join('');
       container.querySelectorAll('[data-ins-rider-desc]').forEach(el => el.addEventListener('input', () => { insTempRiders[el.dataset.insRiderDesc].description = el.value; }));
@@ -3889,25 +3931,25 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const totalPayout = (p.ledger||[]).filter(l => l.type === 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
       summaryEl.innerHTML = `
         <div class="stats-grid">
-          <div class="stat-box"><div class="stat-value" style="font-size:18px;">${insFmtMoney(totalPremium)}</div><div class="stat-label">Total Premium Paid</div></div>
-          <div class="stat-box"><div class="stat-value" style="font-size:18px;">${insFmtMoney(totalPayout)}</div><div class="stat-label">Total Payout Received</div></div>
+          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPremium)}</div><div class="stat-label">Total Premium Paid</div></div>
+          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPayout)}</div><div class="stat-label">Total Payout Received</div></div>
         </div>`;
       const entries = [...(p.ledger||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
-        container.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;">No payment transactions recorded yet.</p>';
+        container.innerHTML = '<p class="s-51f2817c">No payment transactions recorded yet.</p>';
         return;
       }
       container.innerHTML = entries.map(l => `
-        <div style="display:flex;justify-content:space-between;align-items:center;background:var(--bg);padding:10px 12px;border-radius:8px;">
+        <div class="s-952fb81a">
           <div>
-            <div style="font-weight:600;font-size:13px;">${l.type === 'payout' ? '💰' : '💸'} ${escapeHtml(l.date||'--')} <span style="font-weight:400;color:var(--text-secondary);">· ${escapeHtml(l.method||'--')}</span></div>
-            ${l.notes ? `<div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(l.notes)}</div>` : ''}
-            ${(l.attachments && l.attachments.length) ? `<div style="margin-top:4px;">${l.attachments.map((att, idx) => `<span style="cursor:pointer;font-size:11px;color:var(--primary);margin-right:8px;" data-ins-open-ledger-att="${l.id}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+            <div class="s-ea8a0de7">${l.type === 'payout' ? '💰' : '💸'} ${escapeHtml(l.date||'--')} <span class="s-5ea608c5">· ${escapeHtml(l.method||'--')}</span></div>
+            ${l.notes ? `<div class="s-c16bedce">${escapeHtml(l.notes)}</div>` : ''}
+            ${(l.attachments && l.attachments.length) ? `<div class="s-bb680ec5">${l.attachments.map((att, idx) => `<span data-ins-open-ledger-att="${l.id}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <div style="font-weight:700;color:${l.type === 'payout' ? 'var(--success)' : 'var(--text)'};">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</div>
-            <span style="cursor:pointer;color:var(--text-secondary);" data-ins-edit-ledger="${l.id}">✏️</span>
-            <span style="cursor:pointer;color:var(--danger);" data-ins-remove-ledger="${l.id}">🗑️</span>
+          <div class="s-3b6fff87">
+            <div class="${l.type === 'payout' ? 's-ledger-payout' : 's-ledger-expense'}">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</div>
+            <span data-ins-edit-ledger="${l.id}" class="s-080a81ee">✏️</span>
+            <span data-ins-remove-ledger="${l.id}" class="s-abe8a067">🗑️</span>
           </div>
         </div>
       `).join('');
@@ -4037,25 +4079,25 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insRenderSurrenderList(p) {
       const currentEl = document.getElementById('insSurrenderCurrent');
       const total = insLatestSurrenderTotal(p);
-      currentEl.innerHTML = `<div class="stat-box" style="text-align:left;"><div class="stat-label">Current Total Surrender Value</div><div class="stat-value" style="font-size:22px;">${total === null ? '--' : insFmtMoney(total)}</div></div>`;
+      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Total Surrender Value</div><div class="stat-value s-bffeb9ae">${total === null ? '--' : insFmtMoney(total)}</div></div>`;
 
       const container = document.getElementById('insSurrenderList');
       const entries = [...(p.surrenderRecords||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
-        container.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;">No statement records yet. Add one below using figures from your latest Statement of Account.</p>';
+        container.innerHTML = '<p class="s-51f2817c">No statement records yet. Add one below using figures from your latest Statement of Account.</p>';
         return;
       }
       container.innerHTML = entries.map(r => `
-        <div style="background:var(--bg);padding:10px 12px;border-radius:8px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-weight:600;font-size:13px;">${escapeHtml(r.date||'--')}</div>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div style="font-weight:700;">${insFmtMoney(insSurrenderRecordTotal(r))}</div>
-              <span style="cursor:pointer;color:var(--text-secondary);" data-ins-edit-surrender="${r.id}">✏️</span>
-              <span style="cursor:pointer;color:var(--danger);" data-ins-remove-surrender="${r.id}">🗑️</span>
+        <div class="s-198fb7f4">
+          <div class="s-2447f692">
+            <div class="s-ea8a0de7">${escapeHtml(r.date||'--')}</div>
+            <div class="s-3b6fff87">
+              <div class="s-cc568fe7">${insFmtMoney(insSurrenderRecordTotal(r))}</div>
+              <span data-ins-edit-surrender="${r.id}" class="s-080a81ee">✏️</span>
+              <span data-ins-remove-surrender="${r.id}" class="s-abe8a067">🗑️</span>
             </div>
           </div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">
+          <div class="s-ebc463b1">
             Bonus ${insFmtMoney(r.accumulatedBonus)} · Investment Fund Value ${insFmtMoney(r.dividend)} · Guaranteed ${insFmtMoney(r.guaranteedCashValue)} · Non-Guaranteed ${insFmtMoney(r.nonGuaranteedValue)}
           </div>
         </div>
@@ -4135,21 +4177,21 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     }
     function insRenderSumHistoryList(c) {
       const currentEl = document.getElementById('insSumHistoryCurrent');
-      currentEl.innerHTML = `<div class="stat-box" style="text-align:left;"><div class="stat-label">Current Sum Insured</div><div class="stat-value" style="font-size:22px;">${insFmtMoney(insEffectiveSumInsured(c))}</div></div>`;
+      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Sum Insured</div><div class="stat-value s-bffeb9ae">${insFmtMoney(insEffectiveSumInsured(c))}</div></div>`;
 
       const container = document.getElementById('insSumHistoryList');
       const entries = [...(c.sumInsuredHistory||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
-        container.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;">No history yet. Add the initial amount and each year\'s reduced amount below.</p>';
+        container.innerHTML = '<p class="s-51f2817c">No history yet. Add the initial amount and each year\'s reduced amount below.</p>';
         return;
       }
       container.innerHTML = entries.map(h => `
-        <div style="display:flex;justify-content:space-between;align-items:center;background:var(--bg);padding:10px 12px;border-radius:8px;">
-          <div style="font-weight:600;font-size:13px;">${escapeHtml(h.date||'--')}</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <div style="font-weight:700;">${insFmtMoney(h.amount)}</div>
-            <span style="cursor:pointer;color:var(--text-secondary);" data-ins-edit-sumhistory="${h.id}">✏️</span>
-            <span style="cursor:pointer;color:var(--danger);" data-ins-remove-sumhistory="${h.id}">🗑️</span>
+        <div class="s-952fb81a">
+          <div class="s-ea8a0de7">${escapeHtml(h.date||'--')}</div>
+          <div class="s-3b6fff87">
+            <div class="s-cc568fe7">${insFmtMoney(h.amount)}</div>
+            <span data-ins-edit-sumhistory="${h.id}" class="s-080a81ee">✏️</span>
+            <span data-ins-remove-sumhistory="${h.id}" class="s-abe8a067">🗑️</span>
           </div>
         </div>
       `).join('');
@@ -4285,8 +4327,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       </tr>`).join('');
       const totalPremiumPaid = (p.ledger||[]).filter(l => l.type !== 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
       const totalPayoutReceived = (p.ledger||[]).filter(l => l.type === 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
-      const ledgerTotalRow = `<tr style="font-weight:700;background:#f5f7fa;">
-        <td colspan="3" style="text-align:right;">Total</td><td>${insFmtMoney(totalPremiumPaid)} paid${totalPayoutReceived ? ' · ' + insFmtMoney(totalPayoutReceived) + ' received' : ''}</td><td></td>
+      const ledgerTotalRow = `<tr class="s-3940c9c2">
+        <td colspan="3" class="s-08a0ed40">Total</td><td>${insFmtMoney(totalPremiumPaid)} paid${totalPayoutReceived ? ' · ' + insFmtMoney(totalPayoutReceived) + ' received' : ''}</td><td></td>
       </tr>`;
 
       const surrenderRows = [...(p.surrenderRecords||[])].sort((a,b) => new Date(a.date) - new Date(b.date)).map(r => `<tr>
@@ -4398,7 +4440,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insOpenPrintWindow(title, bodyHtml) {
       const win = window.open('', '_blank');
       if (!win) { alert('Please allow pop-ups to view/print the report.'); return; }
+      // Same deliberate per-window CSP as printEmergency's printWindow (see comment there).
       win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(title)}</title>
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#1a1a2e; padding:32px; max-width:900px; margin:0 auto; }
           h1 { font-size:22px; margin-bottom:4px; }
