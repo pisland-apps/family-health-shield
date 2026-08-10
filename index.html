@@ -63,6 +63,17 @@
           - 唯一没有跟着收紧的是上面第 2 点提到的 9 个打印弹窗——它们是完全独立
             的文档，各自带了自己的 CSP（同样允许 style unsafe-inline），跟主
             文档这份 CSP 无关，不冲突也不受影响。
+          - ⚠️ 重要维护提醒：下面 style-src 里那个 'sha256-...' 是这个文件里
+            <style> 块（从 <style> 到 </style> 之间，逐字节，含空白/换行）的
+            哈希。这意味着：以后只要动了这个 <style> 块里的任何一条 CSS 规则
+            ——哪怕只加一行——这个哈希就会失效，浏览器会整块拒绝这份样式表，
+            页面会变成完全没有样式的原始 HTML（这正是 2026-08-10 第一次上线
+            时出现过的真实事故：当时把 style-src 直接收紧成 'self' 又没给
+            <style> 块留哈希，导致整个界面直接"裸奔"）。改完 CSS 之后，跑一下
+            仓库里的 `python3 regen-style-hash.py`，把打印出来的新哈希同时
+            贴进这里的 style-src 和 `_headers` 文件里对应的位置——两处必须
+            完全一致，否则浏览器会按两份 CSP 取交集执行，只要有一份哈希不对，
+            页面照样会裸奔。
 
        4. frame-ancestors 没有写进这个 <meta> 标签：
           - 这是 CSP 规范的限制，不是遗漏——frame-ancestors / sandbox 等指令
@@ -101,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self';
+    style-src 'self' 'sha256-gWM9/uh57dSyJHooQwJDVBB7gLcFhgMcYqgqh7WqALQ=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
