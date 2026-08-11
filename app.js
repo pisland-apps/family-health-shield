@@ -279,9 +279,20 @@
     // the actual data-encryption key is still 100% derived from the passcode,
     // exactly as if the user had typed it.
     const BIO_CONFIG_KEY = 'family_health_tracker_v3_biometric';
-    // Non-extractable "gate mode" wrapping key lives in IndexedDB (it's a real
-    // CryptoKey object, structured-cloned in - can't be stored as a string in
-    // localStorage). Only used as a fallback when PRF isn't available.
+    // REMOVED (security fix): this app used to support a "gate mode" fallback
+    // for devices without WebAuthn PRF, where biometric verification was only
+    // an application-level pass/fail check - the AES key it unlocked was a
+    // separately generated, structured-cloned CryptoKey sitting in IndexedDB,
+    // retrievable and directly usable (crypto.subtle.decrypt) by ANY script
+    // running on the page, with no cryptographic dependency on the WebAuthn
+    // assertion actually succeeding. That gave a false sense of security: it
+    // looked identical to real biometric-gated encryption in the UI, but any
+    // XSS, malicious extension, or someone with devtools access on an already
+    // -unlocked device could recover the passcode without touching a sensor.
+    // We now only support PRF mode, where the AES key is *derived* from the
+    // PRF secret itself and provably cannot exist without a real, successful
+    // biometric assertion. This constant is kept only so any device that
+    // still has an old gate-mode key sitting in IndexedDB gets it cleaned up.
     const BIO_GATE_KEY_ID = 'family_health_tracker_v3_biometric_gate_key';
     function getBioConfig() {
       try { return JSON.parse(localStorage.getItem(BIO_CONFIG_KEY)) || null; } catch { return null; }
@@ -292,6 +303,22 @@
       try { await idbDeleteRaw(BIO_GATE_KEY_ID); } catch { /* nothing to clean up */ }
     }
     function isBiometricEnrolled() { return !!getBioConfig(); }
+
+    // Security migration: any biometric record created by an older version of
+    // this app in "gate mode" is treated as invalid and wiped automatically,
+    // rather than continuing to honor a security promise it can't actually
+    // keep. Returns true if a legacy record was found and removed, so the
+    // caller can let the user know why biometric unlock disappeared and that
+    // they can safely set it up again (it will only succeed on devices that
+    // support genuine WebAuthn PRF).
+    async function migrateLegacyGateBiometric() {
+      const bcfg = getBioConfig();
+      if (bcfg && bioMethodOf(bcfg) === 'gate') {
+        await clearBioConfig();
+        return true;
+      }
+      return false;
+    }
 
     // Normalizes a stored biometric record to an explicit mode, so records
     // written before the 'method' field existed still work: presence of
@@ -323,13 +350,15 @@
       );
     }
 
-    // Registers a platform authenticator credential, trying PRF first
-    // (stronger binding: the wrapping key is derived straight from the
-    // biometric-gated secret) and transparently falling back to "gate mode"
-    // (biometric is just a pass/fail check; the real wrapping key is a
-    // separately-generated, non-extractable AES key held in IndexedDB) on
-    // devices/browsers where PRF isn't available. Throws with a
-    // human-readable message on any failure (cancelled, unsupported, etc.).
+    // Registers a platform authenticator credential using the WebAuthn PRF
+    // extension. PRF is required, not optional: it's what lets us *derive*
+    // the wrapping key from the biometric-gated secret itself, so the key
+    // provably cannot exist without a real successful biometric assertion.
+    // If this device/browser doesn't expose usable PRF output, we deliberately
+    // fail closed (see the removed "gate mode" fallback above) rather than
+    // enroll something that looks like biometric protection but isn't. Throws
+    // with a human-readable message on any failure (cancelled, unsupported,
+    // no PRF available, etc.).
     async function enrollBiometric(passcode) {
       const cfg = getCryptoConfig();
       if (!cfg || !cfg.enabled) throw new Error('Enable encryption first.');
@@ -392,20 +421,21 @@
         }
       }
 
-      if (prfResult) {
-        // ----- PRF mode: wrapping key is derived from the PRF secret itself -----
-        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
-        const wrapped = await encryptText(passcode, wrapKey);
-        setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), wrapped });
-      } else {
-        // ----- Gate mode fallback: biometric is a pass/fail check; the real
-        // wrapping key is a separately generated, non-extractable CryptoKey
-        // stored as-is (structured clone) in IndexedDB. -----
-        const gateKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-        const wrapped = await encryptText(passcode, gateKey);
-        await idbPutRaw(BIO_GATE_KEY_ID, gateKey);
-        setBioConfig({ method: 'gate', credentialId: bufToB64(cred.rawId), wrappingKeyStored: true, wrapped });
+      if (!prfResult) {
+        // Fail closed: this device/browser has a platform authenticator but
+        // no usable PRF output, so we cannot cryptographically bind the
+        // wrapping key to a real biometric assertion. Note the just-created
+        // credential is simply left unused (WebAuthn has no standard API to
+        // delete it from JS) - harmless, since we never store a bio config
+        // for it, so isBiometricEnrolled() stays false and nothing wraps the
+        // passcode with it.
+        throw new Error('This browser/device doesn\'t support secure biometric unlock (no WebAuthn PRF support). Please continue using your passcode.');
       }
+
+      // ----- PRF mode: wrapping key is derived from the PRF secret itself -----
+      const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
+      const wrapped = await encryptText(passcode, wrapKey);
+      setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), wrapped });
     }
 
     // Prompts the biometric sensor and returns the recovered passcode string,
@@ -414,36 +444,25 @@
       const bcfg = getBioConfig();
       if (!bcfg) return null;
       const method = bioMethodOf(bcfg);
+      // Legacy gate-mode records are no longer honored (see
+      // migrateLegacyGateBiometric for why) - callers are expected to run
+      // that migration at UI-render time so this case shouldn't normally be
+      // reached, but we still refuse to use it here as a defense in depth.
+      if (method !== 'prf') return null;
       try {
-        if (method === 'prf') {
-          const assertion = await navigator.credentials.get({
-            publicKey: {
-              challenge: crypto.getRandomValues(new Uint8Array(32)),
-              allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
-              userVerification: 'required',
-              extensions: { prf: { eval: { first: b64ToBuf(bcfg.prfSalt) } } }
-            }
-          });
-          const ext = assertion.getClientExtensionResults();
-          const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
-          if (!prfResult) return null;
-          const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
-          return await decryptText(bcfg.wrapped, wrapKey);
-        } else if (method === 'gate') {
-          // No PRF eval needed here - the credentials.get() call itself is
-          // the biometric "pass/fail" gate; the real key never touches WebAuthn.
-          await navigator.credentials.get({
-            publicKey: {
-              challenge: crypto.getRandomValues(new Uint8Array(32)),
-              allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
-              userVerification: 'required'
-            }
-          });
-          const gateKey = await idbGetRaw(BIO_GATE_KEY_ID);
-          if (!gateKey) return null;
-          return await decryptText(bcfg.wrapped, gateKey);
-        }
-        return null; // unrecognized/corrupt record
+        const assertion = await navigator.credentials.get({
+          publicKey: {
+            challenge: crypto.getRandomValues(new Uint8Array(32)),
+            allowCredentials: [{ id: b64ToBuf(bcfg.credentialId), type: 'public-key' }],
+            userVerification: 'required',
+            extensions: { prf: { eval: { first: b64ToBuf(bcfg.prfSalt) } } }
+          }
+        });
+        const ext = assertion.getClientExtensionResults();
+        const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+        if (!prfResult) return null;
+        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
+        return await decryptText(bcfg.wrapped, wrapKey);
       } catch {
         return null;
       }
@@ -723,10 +742,15 @@
     // full-app lock screen, depending on whether it's enrolled on this device
     // and whether this browser currently supports it.
     async function updateAppLockBioUI() {
+      const migrated = await migrateLegacyGateBiometric();
       const enrolled = isBiometricEnrolled();
       const supported = enrolled && await isPlatformAuthenticatorAvailable();
       document.getElementById('btnAppLockBio').style.display = supported ? 'block' : 'none';
       document.getElementById('appLockBioDivider').style.display = supported ? 'block' : 'none';
+      if (migrated) {
+        document.getElementById('appLockError').textContent =
+          'Biometric unlock was reset on this device for security reasons. Enter your passcode below, then you can turn it back on from Security settings.';
+      }
     }
 
     document.getElementById('btnAppLockUnlock').addEventListener('click', attemptAppUnlock);
@@ -4496,13 +4520,16 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('securityManageSection').style.display = enabled ? 'block' : 'none';
       if (enabled) {
         document.getElementById('secLockStatus').textContent = isUnlocked() ? '🔓 Currently unlocked' : '🔒 Currently locked';
+        const migrated = await migrateLegacyGateBiometric();
         const supported = await isPlatformAuthenticatorAvailable();
         const enrolled = isBiometricEnrolled();
         document.getElementById('bioNotSupported').style.display = supported ? 'none' : 'block';
         document.getElementById('bioEnrollBox').style.display = (supported && !enrolled) ? 'block' : 'none';
         document.getElementById('bioEnabledBox').style.display = (supported && enrolled) ? 'flex' : 'none';
         document.getElementById('bioConfirmPasscode').value = '';
-        document.getElementById('bioSetupError').textContent = '';
+        document.getElementById('bioSetupError').textContent = migrated
+          ? 'Biometric unlock was reset on this device: it was previously set up using a fallback method that didn\'t actually require your biometric to decrypt data. Set it up again below - it will only succeed on devices with full biometric (PRF) support.'
+          : '';
       }
       document.getElementById('secPasscode1').value = '';
       document.getElementById('secPasscode2').value = '';
