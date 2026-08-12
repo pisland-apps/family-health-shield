@@ -181,11 +181,12 @@
       });
     }
 
-    // ========== ATTACHMENT ENCRYPTION (PBKDF2 + AES-GCM via Web Crypto) ==========
-    // Encrypts/decrypts the attachment BLOBS stored in IndexedDB only. The JSON
-    // member/policy data in localStorage, and all exported JSON/ZIP backups,
-    // remain plaintext for portability (see "Encrypt exported backups" toggle,
-    // reserved for later).
+    // ========== ENCRYPTION (PBKDF2 + AES-GCM via Web Crypto) ==========
+    // Encrypts/decrypts the attachment BLOBS stored in IndexedDB, AND (when
+    // encryption is enabled) the entire members/policy JSON blob written to
+    // localStorage by saveData() - see the ENC_PREFIX branch there. Exported
+    // JSON/ZIP backups remain plaintext for portability (see "Encrypt
+    // exported backups" toggle, reserved for later).
     const CRYPTO_CONFIG_KEY = 'family_health_tracker_v3_crypto';
     const ENC_PREFIX = 'ENCv1:';
     let cryptoKey = null; // in-memory CryptoKey; never persisted, cleared on lock/reload
@@ -304,16 +305,31 @@
     }
     function isBiometricEnrolled() { return !!getBioConfig(); }
 
-    // Security migration: any biometric record created by an older version of
-    // this app in "gate mode" is treated as invalid and wiped automatically,
-    // rather than continuing to honor a security promise it can't actually
-    // keep. Returns true if a legacy record was found and removed, so the
-    // caller can let the user know why biometric unlock disappeared and that
-    // they can safely set it up again (it will only succeed on devices that
-    // support genuine WebAuthn PRF).
-    async function migrateLegacyGateBiometric() {
+    // Bump whenever HKDF_SALT (or anything else feeding key derivation)
+    // changes, so we can tell apart PRF records made before/after the change
+    // and safely wipe the ones that were derived with different inputs
+    // (their wrapped passcode would just fail to decrypt otherwise, which is
+    // confusing - "biometric unlock silently stopped working" - rather than
+    // a clear "please set it up again").
+    const HKDF_SALT_VERSION = 2;
+
+    // Security migration: wipes any biometric record that can no longer be
+    // trusted to actually decrypt with the current key-derivation logic,
+    // rather than letting it linger and fail confusingly later. Covers two
+    // cases: (1) legacy "gate mode" records, where biometric verification was
+    // only an application-level pass/fail check with no cryptographic tie to
+    // the unlock key (see the removed gate-mode code above for why that
+    // wasn't real protection), and (2) older PRF-mode records derived before
+    // HKDF_SALT was introduced, which would now decrypt to garbage. Returns
+    // true if a record was found and removed, so the caller can tell the
+    // user why biometric unlock disappeared and that it's safe to set up
+    // again (it will only succeed on devices with genuine WebAuthn PRF).
+    async function migrateLegacyBiometric() {
       const bcfg = getBioConfig();
-      if (bcfg && bioMethodOf(bcfg) === 'gate') {
+      if (!bcfg) return false;
+      const method = bioMethodOf(bcfg);
+      const outdatedPrf = method === 'prf' && bcfg.hkdfSaltVer !== HKDF_SALT_VERSION;
+      if (method === 'gate' || outdatedPrf) {
         await clearBioConfig();
         return true;
       }
@@ -339,10 +355,19 @@
     }
 
     // Derives an AES-256-GCM key from a WebAuthn PRF secret via HKDF.
+    // The salt here doesn't need to be secret (HKDF salts never do) - it's a
+    // fixed, app-specific constant, kept separate from `info` purely so we're
+    // not relying on the PRF output being the only source of "randomness" fed
+    // into HKDF-Extract. Safe to hardcode and safe to publish.
+    const HKDF_SALT = new Uint8Array([
+      0x8f, 0x2a, 0x61, 0xe0, 0x3c, 0x9d, 0x74, 0x1b, 0x5e, 0xa8, 0x02, 0xf6,
+      0x39, 0xc4, 0x1d, 0x87, 0xb0, 0x4e, 0x92, 0x6a, 0xd5, 0x11, 0x7c, 0x38,
+      0xef, 0x60, 0x2b, 0x94, 0x18, 0xa3, 0x55, 0xd9
+    ]);
     async function aesKeyFromPrfSecret(prfBytes) {
       const base = await crypto.subtle.importKey('raw', prfBytes, 'HKDF', false, ['deriveKey']);
       return crypto.subtle.deriveKey(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode('family-health-shield-bio-wrap-v1') },
+        { name: 'HKDF', hash: 'SHA-256', salt: HKDF_SALT, info: new TextEncoder().encode('family-health-shield-bio-wrap-v1') },
         base,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -435,7 +460,7 @@
       // ----- PRF mode: wrapping key is derived from the PRF secret itself -----
       const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
       const wrapped = await encryptText(passcode, wrapKey);
-      setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), wrapped });
+      setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), hkdfSaltVer: HKDF_SALT_VERSION, wrapped });
     }
 
     // Prompts the biometric sensor and returns the recovered passcode string,
@@ -445,7 +470,7 @@
       if (!bcfg) return null;
       const method = bioMethodOf(bcfg);
       // Legacy gate-mode records are no longer honored (see
-      // migrateLegacyGateBiometric for why) - callers are expected to run
+      // migrateLegacyBiometric for why) - callers are expected to run
       // that migration at UI-render time so this case shouldn't normally be
       // reached, but we still refuse to use it here as a defense in depth.
       if (method !== 'prf') return null;
@@ -742,7 +767,7 @@
     // full-app lock screen, depending on whether it's enrolled on this device
     // and whether this browser currently supports it.
     async function updateAppLockBioUI() {
-      const migrated = await migrateLegacyGateBiometric();
+      const migrated = await migrateLegacyBiometric();
       const enrolled = isBiometricEnrolled();
       const supported = enrolled && await isPlatformAuthenticatorAvailable();
       document.getElementById('btnAppLockBio').style.display = supported ? 'block' : 'none';
@@ -4520,7 +4545,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('securityManageSection').style.display = enabled ? 'block' : 'none';
       if (enabled) {
         document.getElementById('secLockStatus').textContent = isUnlocked() ? '🔓 Currently unlocked' : '🔒 Currently locked';
-        const migrated = await migrateLegacyGateBiometric();
+        const migrated = await migrateLegacyBiometric();
         const supported = await isPlatformAuthenticatorAvailable();
         const enrolled = isBiometricEnrolled();
         document.getElementById('bioNotSupported').style.display = supported ? 'none' : 'block';
@@ -4528,7 +4553,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         document.getElementById('bioEnabledBox').style.display = (supported && enrolled) ? 'flex' : 'none';
         document.getElementById('bioConfirmPasscode').value = '';
         document.getElementById('bioSetupError').textContent = migrated
-          ? 'Biometric unlock was reset on this device: it was previously set up using a fallback method that didn\'t actually require your biometric to decrypt data. Set it up again below - it will only succeed on devices with full biometric (PRF) support.'
+          ? 'Biometric unlock was reset on this device for security reasons (either it used an older, less secure fallback method, or its underlying key needs to be regenerated). Set it up again below - it will only succeed on devices with full biometric (PRF) support.'
           : '';
       }
       document.getElementById('secPasscode1').value = '';
