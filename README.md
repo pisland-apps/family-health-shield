@@ -96,6 +96,12 @@ const CACHE_VERSION = 'v1';
 - 点击劫持防护:`_headers` 里的 `frame-ancestors 'none'` + `X-Frame-Options: DENY` 只有部署在 **Cloudflare Pages**(或其它支持自定义响应头的静态托管)上才会生效——这是 HTTP 响应头级别的保护,`_headers` 文件本身在 GitHub Pages 上会被直接忽略。
 - CSP `style-src`(2026-08-10 起收紧为 `'self'` 加一个 `<style>` 块内容的哈希,不再有 `'unsafe-inline'`):主界面(index.html + app.js 渲染主界面的部分)原来约 285 处内联 `style="..."` 已全部改成预生成的 CSS class,详见 `index.html` 里 `<style>` 块末尾的注释和 CSP `<meta>` 上方的设计说明。**例外**:9 个打印/报告弹窗(BP 记录、用药清单、保单摘要等)仍然使用内联样式,但每个弹窗现在都在自己的文档里带了一份独立、明确写出来的 CSP `<meta>`(而不是隐式沿用或不受约束),细节见 app.js 里 `printEmergency` 函数上方的注释——这是刻意的范围划分,不是遗漏。
 - ⚠️ **改 `index.html` 里 `<style>` 块的 CSS 之前必读**:style-src 现在靠一个精确到字节的 CSS 哈希放行主样式表,而不是笼统的 `'unsafe-inline'`。这意味着改动 `<style>` 块里任何一条规则(哪怕只加一行)都会让这个哈希失效——浏览器不会报错也不会降级,而是直接整体拒绝这份样式表,页面瞬间变成没有任何样式的纯文字(2026-08-10 上线时真实发生过一次,起因是收紧 CSP 时漏算了这一点)。**改完 CSS 后必须跑一次** `python3 regen-style-hash.py`,把打印出来的新哈希**同时**贴到两个地方:`index.html` 里 CSP `<meta>` 的 `style-src` 那一行,以及 `_headers` 文件里 `Content-Security-Policy` 的 `style-src` 那一段——两处必须完全一致,浏览器会取两份 CSP 的交集执行,漏改任何一处页面照样会裸奔。
-- v19(2026-08-10)修了两个使用体验问题:
+- 第三方库是 vendor 进仓库的本地文件(`lib/jszip.min.js`、`lib/pdf.min.mjs` + `lib/pdf.worker.min.mjs`),不会跟着 npm 自动更新。建议**每季度手动检查一次**上游是否有新版本/安全公告(jszip: https://github.com/Stuk/jszip/releases ,pdf.js: https://github.com/mozilla/pdf.js/releases ),有的话下载新的 `.min.js`/`.min.mjs` 文件直接替换,不需要改代码(除非上游有 breaking change)。
+- v23/v24(2026-08-12)安全加固:
+  1. **导入备份文件的输入校验**:`normalizeImportedMembers()` 之前只把导入 JSON 里的各种 `.id` 字段做 `String()` 类型转换,没有校验内容;这些 id 又被多处 `innerHTML` 拼接时直接使用(没有 `escapeHtml()`,因为假设 id 一定是内部生成的安全字符串)。一份精心构造的备份文件因此可以把任意 HTML/脚本注入进渲染出的页面(尤其是 9 个打印弹窗,那里 CSP 允许内联脚本执行)。现在导入的 id 会先做白名单校验(`sanitizeId()`/`sanitizeIdsDeep()`),不合法就重新生成;导入的 `vitals` 数值字段也会跟手动录入表单一样做 `parseFloat()` 校验(`sanitizeVitals()`)。同时把所有 `.id` 拼接进 `innerHTML` 的地方(约 37 处)统一加上 `escapeHtml()` 作为纵深防御。
+  2. **PBKDF2 迭代次数从 150,000 提升到 600,000**(`PBKDF2_CONFIGS` / `PBKDF2_ITER_VERSION`,对齐 OWASP 2026 年的建议下限)。已启用加密的旧设备首次解锁时会在后台自动完成一次性迁移(`migratePbkdf2Iterations()`):用当次输入的密码重新派生新密钥、重新加密所有附件和主数据,全部成功后才切换配置,任何一步失败都不会写入任何改动,下次解锁自动重试——迁移期间会用 `beforeunload` 提示不要关闭页面。
+  3. `_headers` 增加 `Strict-Transport-Security` 和 `Cross-Origin-Opener-Policy: same-origin`。
+  4. pdf.js 调用显式加上 `isEvalSupported: false`,即使当前 vendored 版本已修复相关 CVE,也作为纵深防御保留。
+
   1. 保单 Ledger 编辑交易记录:点"编辑"以前不会自动滚动到表单(表单在列表上方),存完也不会滚回去定位到那条记录,列表长了很麻烦。现在点编辑会自动滚到表单,存完会自动滚回那条记录并短暂高亮,不用再手动上下找。
   2. Chrome 在存 Add Member 之类操作时弹出"是否保存密码"提示:根源是整个 App 里始终有 8 个 `type="password"` 的输入框常驻在 DOM 里(解锁、修改密码、导入导出密码等),哪怕当下没显示——Chrome 只要页面上存在这种输入框就可能触发保存密码提示,不需要 `<form>`,这些字段本来也不是网站登录密码,被 Chrome 密码管理器介入其实是误判。改成 `type="text"` 加 CSS(`-webkit-text-security`)做视觉遮罩,效果看起来还是圆点,但 Chrome 不会再当成登录密码框。

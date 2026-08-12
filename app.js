@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v22';
+    const APP_VERSION = 'v24';
     const APP_VERSION_DATE = '2026-08-12';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -110,6 +110,73 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+    }
+
+    // ========== IMPORT SANITIZATION ==========
+    // Every .id field in this app (member/record/reminder/policy/coverage/
+    // claim/ledger/surrender-record/sum-history-entry) is treated as a
+    // trusted, internally-generated token throughout renderMain() and
+    // friends - it's interpolated into innerHTML strings (data-id="...",
+    // data-ledger-row-id="...", etc.) WITHOUT escapeHtml(), because normal
+    // app code only ever creates ids via Date.now()/Math.random()/insUid(),
+    // which can't contain HTML metacharacters.
+    //
+    // Importing a backup file is the one path that can hand this app an id
+    // it didn't generate itself. normalizeImportedMembers() previously did
+    // `id: raw.id ? String(raw.id) : ...` - a type cast, not a content
+    // check - so a crafted backup JSON/ZIP could set id to something like
+    // `x"><img src=x onerror=...>` and have it land unescaped in the DOM.
+    // sanitizeId() closes that: any id that isn't a plain token gets
+    // replaced with a freshly generated one instead of being trusted as-is.
+    const SAFE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+    function sanitizeId(raw, fallback) {
+      const s = (raw === null || raw === undefined) ? '' : String(raw);
+      return SAFE_ID_RE.test(s) ? s : fallback;
+    }
+    function freshId(prefix) {
+      return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+
+    // Same problem, different field: vitals entered through the UI always
+    // pass through parseFloat() (see the vitals form handler), so
+    // r.vitals.systolic etc. are guaranteed numeric everywhere they're
+    // rendered - including the 9 print/report popups, which run with
+    // script-src 'unsafe-inline' for their own print button. Imported
+    // vitals previously bypassed that guarantee entirely (passed through
+    // as whatever the JSON contained), which combined with the popups'
+    // relaxed CSP would let a crafted backup achieve real script execution
+    // there, not just inert HTML. sanitizeVitals() re-applies the same
+    // parseFloat/isFinite check the UI form uses, so imported vitals are
+    // exactly as trustworthy as hand-entered ones.
+    function sanitizeVitals(v) {
+      if (!v || typeof v !== 'object') return undefined;
+      const out = {};
+      ['systolic', 'diastolic', 'heartRate', 'temp', 'glucose', 'weight'].forEach(k => {
+        const n = parseFloat(v[k]);
+        if (Number.isFinite(n)) out[k] = n;
+      });
+      return Object.keys(out).length ? out : undefined;
+    }
+
+    // Deep-walks an imported value (objects/arrays only - the insurance
+    // blob especially, which has several nested id-bearing levels:
+    // policies -> coverages -> sumInsuredHistory, policies -> ledger ->
+    // attachments, policies -> riders, claims, surrenderRecords) and
+    // replaces any property literally named "id" that isn't a safe token
+    // with a freshly generated one. Deliberately generic rather than a
+    // field-by-field remap like normalizeImportedMembers() uses for the
+    // top-level member/record/reminder shape: the insurance schema has
+    // enough nested variants that hand-mapping every one risks silently
+    // dropping a field the insurance module still depends on. Walking and
+    // fixing only `id` keys leaves every other field untouched.
+    function sanitizeIdsDeep(value) {
+      if (Array.isArray(value)) {
+        value.forEach(sanitizeIdsDeep);
+      } else if (value && typeof value === 'object') {
+        if ('id' in value) value.id = sanitizeId(value.id, freshId('imp'));
+        Object.keys(value).forEach(k => sanitizeIdsDeep(value[k]));
+      }
+      return value;
     }
 
     // Returns a NEW array of records sorted by date descending (newest first).
@@ -225,12 +292,28 @@
       return arr.buffer;
     }
 
-    async function deriveKeyFromPasscode(passcode, saltB64) {
+    // Bump PBKDF2_ITER_VERSION (and add a new entry to PBKDF2_CONFIGS) any
+    // time the target iteration count needs to go up - same versioned-table
+    // pattern as HKDF_CONFIGS/HKDF_SALT_VERSION below, so old configs stay
+    // decodable (we know exactly which iteration count they were derived
+    // with) while new ones get the stronger setting automatically. Version 1
+    // is the original, pre-migration count this app shipped with for every
+    // device that enabled encryption before this table existed - kept here
+    // (not deleted) purely so cryptoUnlock() can still derive the right key
+    // for those existing configs; new encryption setups never use it.
+    const PBKDF2_ITER_VERSION = 2;
+    const PBKDF2_CONFIGS = {
+      1: 150000,   // legacy - kept only to unlock configs created before this migration
+      2: 600000    // current - OWASP-recommended floor for PBKDF2-HMAC-SHA256 as of 2026
+      // 3: <higher count>  // next rotation
+    };
+
+    async function deriveKeyFromPasscode(passcode, saltB64, iterations = PBKDF2_CONFIGS[PBKDF2_ITER_VERSION]) {
       const enc = new TextEncoder();
       const salt = b64ToBuf(saltB64);
       const baseKey = await crypto.subtle.importKey('raw', enc.encode(passcode), 'PBKDF2', false, ['deriveKey']);
       return crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
+        { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
         baseKey,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -254,9 +337,9 @@
     async function cryptoSetup(passcode) {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const saltB64 = bufToB64(salt);
-      const key = await deriveKeyFromPasscode(passcode, saltB64);
+      const key = await deriveKeyFromPasscode(passcode, saltB64); // always uses PBKDF2_CONFIGS[PBKDF2_ITER_VERSION] - a brand-new setup has no legacy config to preserve
       const verifier = await encryptText('verify-ok', key);
-      setCryptoConfig({ enabled: true, salt: saltB64, verifier });
+      setCryptoConfig({ enabled: true, salt: saltB64, verifier, iterVer: PBKDF2_ITER_VERSION });
       cryptoKey = key;
     }
 
@@ -264,15 +347,109 @@
       const cfg = getCryptoConfig();
       if (!cfg || !cfg.enabled) return false;
       try {
-        const key = await deriveKeyFromPasscode(passcode, cfg.salt);
+        // Configs written before PBKDF2_ITER_VERSION existed have no iterVer
+        // field - treat those as version 1 (the count this app used to
+        // hardcode) rather than defaulting to the current/highest count,
+        // which would silently fail to unlock every pre-existing vault.
+        const iterVer = cfg.iterVer || 1;
+        const key = await deriveKeyFromPasscode(passcode, cfg.salt, PBKDF2_CONFIGS[iterVer]);
         const check = await decryptText(cfg.verifier, key);
         if (check !== 'verify-ok') return false;
         cryptoKey = key;
+        // Fire-and-forget: bring this vault's iteration count up to the
+        // current standard now that we have the plaintext passcode in hand
+        // (we never store it, so this is the only time we can do this).
+        // Runs after cryptoKey is already set so the just-completed unlock
+        // isn't held up waiting on it.
+        if (iterVer < PBKDF2_ITER_VERSION) migratePbkdf2Iterations(passcode, iterVer);
         return true;
       } catch { return false; }
     }
 
     function cryptoLock() { cryptoKey = null; }
+
+    // Re-keys an already-unlocked vault from an older PBKDF2 iteration count
+    // up to the current one, using the passcode the user just typed/supplied
+    // via biometric unlock. This touches every encrypted attachment in
+    // IndexedDB plus the main data blob in localStorage, so it's written to
+    // fail SAFE rather than fail FAST: every attachment is decrypted with
+    // the old key and re-encrypted with the new key into a staging list
+    // first, and nothing is written back to IndexedDB - let alone the new
+    // salt/verifier/iterVer committed to localStorage - until every single
+    // one of those succeeds. If any attachment can't be decrypted with the
+    // old key (shouldn't happen; the vault is unlocked, so the old key is
+    // known-good, but corruption is always possible), the whole migration
+    // aborts and nothing changes - the vault keeps working exactly as
+    // before under the old iteration count, and will simply retry this
+    // migration on the next unlock.
+    //
+    // Known accepted trade-off (same philosophy as saveData()'s async
+    // write): if the tab is closed mid-migration, after the IndexedDB
+    // writes below have started but before setCryptoConfig() commits the
+    // new salt/verifier, the vault is left with a mix of old- and
+    // new-key-encrypted attachments while the config still points at the
+    // old key. beforeUnloadDuringMigration below warns the user not to
+    // close the tab while this is running to make that window as small and
+    // as visible as possible; it isn't a fully atomic transaction.
+    let pbkdf2MigrationInProgress = false;
+    function beforeUnloadDuringMigration(e) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+    async function migratePbkdf2Iterations(passcode, fromIterVer) {
+      if (pbkdf2MigrationInProgress) return; // already running (e.g. two unlock paths raced)
+      pbkdf2MigrationInProgress = true;
+      window.addEventListener('beforeunload', beforeUnloadDuringMigration);
+      try {
+        const oldKey = cryptoKey;
+        const newSaltB64 = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
+        const newKey = await deriveKeyFromPasscode(passcode, newSaltB64, PBKDF2_CONFIGS[PBKDF2_ITER_VERSION]);
+
+        // Stage every attachment re-encryption before writing anything.
+        const ids = collectAllAttachmentIds();
+        const staged = []; // { id, newValue }
+        for (const id of ids) {
+          let raw;
+          try { raw = await idbGetRaw(id); } catch { continue; }
+          if (typeof raw !== 'string' || !raw.startsWith(ENC_PREFIX)) continue; // not encrypted - nothing to re-key
+          const plain = await decryptText(raw, oldKey); // throws -> caught below, whole migration aborts
+          staged.push({ id, newValue: await encryptText(plain, newKey) });
+        }
+
+        // If the user added/removed an attachment while we were staging
+        // (idbPut() always encrypts under whatever key is current, so a
+        // concurrently-added attachment above would still be sitting under
+        // oldKey), committing now would orphan it: the config we're about
+        // to write only remembers the NEW salt, so oldKey becomes
+        // permanently underivable from a later cryptoUnlock() and that
+        // attachment could never be decrypted again. Bail out instead -
+        // nothing has been written yet, so this is a clean no-op, and the
+        // next unlock simply tries the migration again against the vault's
+        // current contents.
+        const idsNow = collectAllAttachmentIds();
+        if (idsNow.length !== ids.length || idsNow.some(id => !ids.includes(id))) {
+          throw new Error('vault contents changed during migration staging, retrying next unlock');
+        }
+
+        // Nothing above can have modified IndexedDB or localStorage yet -
+        // safe to commit now that every attachment re-encrypted cleanly.
+        for (const { id, newValue } of staged) {
+          await idbPutRaw(id, newValue);
+        }
+        const newVerifier = await encryptText('verify-ok', newKey);
+        cryptoKey = newKey;
+        setCryptoConfig({ enabled: true, salt: newSaltB64, verifier: newVerifier, iterVer: PBKDF2_ITER_VERSION });
+        saveData(); // re-encrypts the members/insurance blob under the new key
+      } catch (err) {
+        // Nothing committed - old config/key/attachments are untouched, so
+        // there's nothing to roll back. Just log and let the next unlock
+        // retry from scratch.
+        console.warn('PBKDF2 iteration migration skipped this time:', err);
+      } finally {
+        pbkdf2MigrationInProgress = false;
+        window.removeEventListener('beforeunload', beforeUnloadDuringMigration);
+      }
+    }
 
     // ===== Biometric unlock (Face ID / Touch ID / Fingerprint via WebAuthn) =====
     // How this works: WebAuthn platform authenticators can't decrypt arbitrary
@@ -1050,14 +1227,14 @@
       list.innerHTML = members.map(m => {
         const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
         return `
-          <div class="member-item ${m.id === currentMemberId ? 'active' : ''}" data-id="${m.id}">
+          <div class="member-item ${m.id === currentMemberId ? 'active' : ''}" data-id="${escapeHtml(m.id)}">
             <div class="member-avatar">${escapeHtml(getAvatarChar(m))}</div>
             <div class="member-info">
               <div class="member-name">${escapeHtml(m.name)}</div>
               ${m.nameZh ? `<div class="s-c16bedce">${escapeHtml(m.nameZh)}</div>` : ''}
               <div class="member-meta">${escapeHtml(m.gender)} &middot; ${age}y &middot; Type ${escapeHtml(m.blood)}</div>
             </div>
-            <span class="member-delete" data-id="${m.id}" title="Delete member">&times;</span>
+            <span class="member-delete" data-id="${escapeHtml(m.id)}" title="Delete member">&times;</span>
           </div>
         `;
       }).join('');
@@ -1314,13 +1491,13 @@
         <div class="card">
           <div class="card-title">📄 Reports</div>
           <div class="s-7137c2f6">
-            <button class="btn btn-secondary btn-sm" data-report-type="summary" data-report-member="${m.id}">📋 Health Summary</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="vaccine" data-report-member="${m.id}">💉 Vaccine Record</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="medication" data-report-member="${m.id}">💊 Medication List</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="lab" data-report-member="${m.id}">🔬 Lab Results</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="bp" data-report-member="${m.id}">🩺 BP Log</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="growth" data-report-member="${m.id}">📏 Growth Chart</button>
-            <button class="btn btn-secondary btn-sm" data-report-type="annual" data-report-member="${m.id}">📅 Annual Report</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="summary" data-report-member="${escapeHtml(m.id)}">📋 Health Summary</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="vaccine" data-report-member="${escapeHtml(m.id)}">💉 Vaccine Record</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="medication" data-report-member="${escapeHtml(m.id)}">💊 Medication List</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="lab" data-report-member="${escapeHtml(m.id)}">🔬 Lab Results</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="bp" data-report-member="${escapeHtml(m.id)}">🩺 BP Log</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="growth" data-report-member="${escapeHtml(m.id)}">📏 Growth Chart</button>
+            <button class="btn btn-secondary btn-sm" data-report-type="annual" data-report-member="${escapeHtml(m.id)}">📅 Annual Report</button>
           </div>
         </div>
       `;
@@ -1346,8 +1523,8 @@
                     <div class="s-140c3f9b">
                       <div class="timeline-date">${escapeHtml(r.date)} &middot; ${icon} ${escapeHtml(r.type)}</div>
                       <div class="s-ef34e083">
-                        <span class="member-delete s-19e87f8e" data-edit-record="${r.id}" title="Edit record">✏️</span>
-                        <span class="member-delete s-19e87f8e" data-delete-record="${r.id}" title="Delete record">&times;</span>
+                        <span class="member-delete s-19e87f8e" data-edit-record="${escapeHtml(r.id)}" title="Edit record">✏️</span>
+                        <span class="member-delete s-19e87f8e" data-delete-record="${escapeHtml(r.id)}" title="Delete record">&times;</span>
                       </div>
                     </div>
                     <div class="timeline-title">${escapeHtml(r.title)}</div>
@@ -1415,9 +1592,9 @@
                 </div>
                 <span class="tag ${r.status === 'overdue' ? 'tag-red' : r.status === 'upcoming' ? 'tag-yellow' : 'tag-green'}">${r.statusText}</span>
                 ${r.isCustom ? `
-                  <span class="member-delete s-19e87f8e" data-done-reminder="${r.id}" title="Mark done">✔️</span>
-                  <span class="member-delete s-19e87f8e" data-edit-reminder="${r.id}" title="Edit">✏️</span>
-                  <span class="member-delete s-19e87f8e" data-delete-reminder="${r.id}" title="Delete">&times;</span>
+                  <span class="member-delete s-19e87f8e" data-done-reminder="${escapeHtml(r.id)}" title="Mark done">✔️</span>
+                  <span class="member-delete s-19e87f8e" data-edit-reminder="${escapeHtml(r.id)}" title="Edit">✏️</span>
+                  <span class="member-delete s-19e87f8e" data-delete-reminder="${escapeHtml(r.id)}" title="Delete">&times;</span>
                 ` : ''}
               </div>
             `).join('') || '<p class="s-9155c939">No reminders</p>'}
@@ -1598,7 +1775,15 @@
           try {
             const bytes = new Uint8Array(await blob.arrayBuffer());
             const pdfjsLib = await pdfjsLibPromise;
-            const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+            // isEvalSupported: false - belt-and-suspenders on top of the fact
+            // that we only call getPage()/render() here (no AcroForm/embedded
+            // JS execution path is ever invoked): explicitly tells pdf.js not
+            // to use eval()/new Function() for any internal optimization, so
+            // a malicious PDF can't get script execution out of the parser
+            // even via a future pdf.js regression of the kind fixed in
+            // CVE-2026-16633. Harmless for rendering - eval is only ever used
+            // there as a speed optimization, never a required code path.
+            const pdf = await pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise;
             body.innerHTML = '';
             const containerWidth = body.clientWidth || 700;
             for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -2983,7 +3168,7 @@
         if (!raw || typeof raw !== 'object') throw new Error(`Member #${i + 1} is not a valid object.`);
         if (!raw.name || typeof raw.name !== 'string') throw new Error(`Member #${i + 1} is missing a name.`);
         return {
-          id: raw.id ? String(raw.id) : (Date.now() + i).toString(),
+          id: sanitizeId(raw.id, (Date.now() + i).toString()),
           name: raw.name,
           nameZh: raw.nameZh || '',
           nameZhAvatarIdx: parseInt(raw.nameZhAvatarIdx) || 1,
@@ -2996,25 +3181,29 @@
           emergency: raw.emergency || '',
           bloodTypeAttachment: (raw.bloodTypeAttachment && typeof raw.bloodTypeAttachment === 'object') ? raw.bloodTypeAttachment : null,
           customReminders: Array.isArray(raw.customReminders) ? raw.customReminders.map((cr, j) => ({
-            id: cr.id ? String(cr.id) : ('cr' + Date.now() + j),
+            id: sanitizeId(cr.id, freshId('cr')),
             title: cr.title || 'Reminder',
             dueDate: cr.dueDate || new Date().toISOString().slice(0, 10),
             repeatMonths: parseInt(cr.repeatMonths) || 0,
             notes: cr.notes || ''
           })) : [],
           records: Array.isArray(raw.records) ? raw.records.map(r => ({
-            id: r.id ? String(r.id) : ('r' + Date.now() + Math.random().toString(36).slice(2, 6)),
+            id: sanitizeId(r.id, freshId('r')),
             date: r.date || new Date().toISOString().slice(0, 10),
             type: r.type || 'Checkup',
             title: r.title || r.type || 'Record',
             details: r.details || '',
             tags: Array.isArray(r.tags) ? r.tags : [],
-            vitals: (r.vitals && typeof r.vitals === 'object') ? r.vitals : undefined,
+            vitals: sanitizeVitals(r.vitals),
             attachments: Array.isArray(r.attachments) ? r.attachments : undefined
           })) : [],
+          // sanitizeIdsDeep rewrites every nested "id" (policies, coverages,
+          // sumInsuredHistory entries, riders, ledger rows, claims,
+          // surrenderRecords, attachments) in place - see its comment above
+          // for why this is a deep walk rather than a field-by-field remap.
           insurance: (raw.insurance && typeof raw.insurance === 'object') ? {
-            policies: Array.isArray(raw.insurance.policies) ? raw.insurance.policies : [],
-            claims: Array.isArray(raw.insurance.claims) ? raw.insurance.claims : []
+            policies: sanitizeIdsDeep(Array.isArray(raw.insurance.policies) ? raw.insurance.policies : []),
+            claims: sanitizeIdsDeep(Array.isArray(raw.insurance.claims) ? raw.insurance.claims : [])
           } : { policies: [], claims: [] }
         };
       });
@@ -3597,9 +3786,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             <div class="s-4ca7474c">
               ${inDiscontinuedTab ? '<span class="tag tag-gray">🚫 Discontinued</span>' : `<span class="tag ${tagClass}">${tagText}</span>`}
               <div class="policy-actions">
-                ${inDiscontinuedTab ? `<span data-ins-reactivate-policy="${p.id}" title="Reactivate">🔄</span>` : ''}
-                <span data-ins-edit-policy="${p.id}">✏️</span>
-                <span data-ins-delete-policy="${p.id}">🗑️</span>
+                ${inDiscontinuedTab ? `<span data-ins-reactivate-policy="${escapeHtml(p.id)}" title="Reactivate">🔄</span>` : ''}
+                <span data-ins-edit-policy="${escapeHtml(p.id)}">✏️</span>
+                <span data-ins-delete-policy="${escapeHtml(p.id)}">🗑️</span>
               </div>
             </div>
           </div>
@@ -3611,7 +3800,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           ${coverages.length ? `<div class="s-097e6af4">${coverages.map(c => insRenderCoverageSummary(m, p, c)).join('')}</div>` : '<p class="s-e1b40251">No coverage details added yet — click ✏️ to add.</p>'}
           ${payout ? `<div class="s-406b76fd">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} · next payout ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</div>` : ''}
           ${p.premiumPaidByBonus ? `<div class="s-e6bec453">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</div>` : ''}
-          ${(p.attachments && p.attachments.length) ? `<div class="s-eae4831c">${p.attachments.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${p.id}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+          ${(p.attachments && p.attachments.length) ? `<div class="s-eae4831c">${p.attachments.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${escapeHtml(p.id)}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
           ${p.notes ? `<div class="s-ca2edd98">${escapeHtml(p.notes)}</div>` : ''}
           ${(p.riders && p.riders.length) ? `<div class="s-eae4831c">${p.riders.map(r => {
             const rd = insDaysUntil(r.dueDate);
@@ -3624,9 +3813,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             return `<span class="tag ${rc}" title="${isExpired ? 'Expired on' : 'Due'} ${escapeHtml(r.dueDate||'--')}">${icon} ${label}</span>`;
           }).join('')}</div>` : ''}
           <div class="s-79744520">
-            <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${p.id}">📒 Ledger (${(p.ledger||[]).length})</button>
-            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${p.id}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span data-ins-open-surrender="${p.id}" class="s-41b07b38">+ Track Surrender Value</span>`}
-            <button class="btn btn-secondary btn-sm" data-ins-open-report="${p.id}">🖨️ View / Print</button>
+            <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${escapeHtml(p.id)}">📒 Ledger (${(p.ledger||[]).length})</button>
+            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${escapeHtml(p.id)}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span data-ins-open-surrender="${escapeHtml(p.id)}" class="s-41b07b38">+ Track Surrender Value</span>`}
+            <button class="btn btn-secondary btn-sm" data-ins-open-report="${escapeHtml(p.id)}">🖨️ View / Print</button>
           </div>
         </div>
       `;
@@ -3651,7 +3840,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             ${c.annualLimit ? `<div><div class="policy-field-label">Annual Limit</div><div class="policy-field-value">${insFmtMoney(c.annualLimit)}</div></div>` : ''}
             ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime)} <span class="s-5594ca44">/ ${insFmtMoney(c.lifetimeLimit)}</span></div></div>` : ''}
           </div>` : ''}
-          ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${p.id}" data-ins-cov-id="${c.id}" class="s-c0623ab3">📉 View / Update Sum Insured History (${(c.sumInsuredHistory||[]).length})</span></div>` : ''}
+          ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${escapeHtml(p.id)}" data-ins-cov-id="${escapeHtml(c.id)}" class="s-c0623ab3">📉 View / Update Sum Insured History (${(c.sumInsuredHistory||[]).length})</span></div>` : ''}
         </div>
       `;
     }
@@ -3679,8 +3868,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             <div class="s-4ca7474c">
               <span class="tag ${insStatusTagClass(c.status)}">${escapeHtml(c.status)}</span>
               <div class="policy-actions">
-                <span data-ins-edit-claim="${c.id}">✏️</span>
-                <span data-ins-delete-claim="${c.id}">🗑️</span>
+                <span data-ins-edit-claim="${escapeHtml(c.id)}">✏️</span>
+                <span data-ins-delete-claim="${escapeHtml(c.id)}">🗑️</span>
               </div>
             </div>
           </div>
@@ -4031,16 +4220,16 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         return;
       }
       container.innerHTML = entries.map(l => `
-        <div class="s-952fb81a s-ledger-row" data-ledger-row-id="${l.id}">
+        <div class="s-952fb81a s-ledger-row" data-ledger-row-id="${escapeHtml(l.id)}">
           <div>
             <div class="s-ea8a0de7">${l.type === 'payout' ? '💰' : '💸'} ${escapeHtml(l.date||'--')} <span class="s-5ea608c5">· ${escapeHtml(l.method||'--')}</span></div>
             ${l.notes ? `<div class="s-c16bedce">${escapeHtml(l.notes)}</div>` : ''}
-            ${(l.attachments && l.attachments.length) ? `<div class="s-bb680ec5">${l.attachments.map((att, idx) => `<span data-ins-open-ledger-att="${l.id}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+            ${(l.attachments && l.attachments.length) ? `<div class="s-bb680ec5">${l.attachments.map((att, idx) => `<span data-ins-open-ledger-att="${escapeHtml(l.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
           </div>
           <div class="s-3b6fff87">
             <div class="${l.type === 'payout' ? 's-ledger-payout' : 's-ledger-expense'}">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</div>
-            <span data-ins-edit-ledger="${l.id}" class="s-080a81ee">✏️</span>
-            <span data-ins-remove-ledger="${l.id}" class="s-abe8a067">🗑️</span>
+            <span data-ins-edit-ledger="${escapeHtml(l.id)}" class="s-080a81ee">✏️</span>
+            <span data-ins-remove-ledger="${escapeHtml(l.id)}" class="s-abe8a067">🗑️</span>
           </div>
         </div>
       `).join('');
@@ -4200,8 +4389,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             <div class="s-ea8a0de7">${escapeHtml(r.date||'--')}</div>
             <div class="s-3b6fff87">
               <div class="s-cc568fe7">${insFmtMoney(insSurrenderRecordTotal(r))}</div>
-              <span data-ins-edit-surrender="${r.id}" class="s-080a81ee">✏️</span>
-              <span data-ins-remove-surrender="${r.id}" class="s-abe8a067">🗑️</span>
+              <span data-ins-edit-surrender="${escapeHtml(r.id)}" class="s-080a81ee">✏️</span>
+              <span data-ins-remove-surrender="${escapeHtml(r.id)}" class="s-abe8a067">🗑️</span>
             </div>
           </div>
           <div class="s-ebc463b1">
@@ -4297,8 +4486,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="s-ea8a0de7">${escapeHtml(h.date||'--')}</div>
           <div class="s-3b6fff87">
             <div class="s-cc568fe7">${insFmtMoney(h.amount)}</div>
-            <span data-ins-edit-sumhistory="${h.id}" class="s-080a81ee">✏️</span>
-            <span data-ins-remove-sumhistory="${h.id}" class="s-abe8a067">🗑️</span>
+            <span data-ins-edit-sumhistory="${escapeHtml(h.id)}" class="s-080a81ee">✏️</span>
+            <span data-ins-remove-sumhistory="${escapeHtml(h.id)}" class="s-abe8a067">🗑️</span>
           </div>
         </div>
       `).join('');
@@ -4352,7 +4541,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       insEnsureData(m);
       if (!m.insurance.policies.length) { alert('Add a policy for this member first'); return; }
       const sel = document.getElementById('insCPolicyId');
-      sel.innerHTML = m.insurance.policies.map(p => `<option value="${p.id}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}</option>`).join('');
+      sel.innerHTML = m.insurance.policies.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}</option>`).join('');
       const c = id ? m.insurance.claims.find(x => x.id === id) : null;
       document.getElementById('insClaimModalTitle').textContent = id ? 'Edit Claim' : 'Add Claim';
       if (c) sel.value = c.policyId;
@@ -4373,7 +4562,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         covSel.innerHTML = '<option value="">(no coverage details on this policy)</option>';
         return;
       }
-      covSel.innerHTML = coverages.map(c => `<option value="${c.id}">${escapeHtml(insCoverageLabel(c))}${c.sumInsured ? ' — ' + insFmtMoney(c.sumInsured) : ''}</option>`).join('');
+      covSel.innerHTML = coverages.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(insCoverageLabel(c))}${c.sumInsured ? ' — ' + insFmtMoney(c.sumInsured) : ''}</option>`).join('');
       if (selectedCoverageId) covSel.value = selectedCoverageId;
     }
     document.getElementById('insBtnCancelClaim').addEventListener('click', () => document.getElementById('insClaimModal').classList.remove('active'));
@@ -4406,7 +4595,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === memberId);
       const sel = document.getElementById('insRPolicyId');
       sel.innerHTML = '<option value="all">📋 All Policies (full summary)</option>' +
-        m.insurance.policies.map(p => `<option value="${p.id}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
+        m.insurance.policies.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
       sel.value = preselectPolicyId || 'all';
       document.getElementById('insRIncludeDiscontinued').checked = false;
       document.getElementById('insReportModal').classList.add('active');
