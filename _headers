@@ -4,3 +4,6 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+
+/*.mjs
+  Content-Type: text/javascript; charset=utf-8

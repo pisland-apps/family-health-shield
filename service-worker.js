@@ -21,7 +21,7 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v21';
+const CACHE_VERSION = 'v22';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -34,8 +34,8 @@ const APP_SHELL = [
   './icons/icon-maskable-192.png',
   './icons/icon-maskable-512.png',
   './lib/jszip.min.js',
-  './lib/pdf.min.js',
-  './lib/pdf.worker.min.js'
+  './lib/pdf.min.mjs',
+  './lib/pdf.worker.min.mjs'
 ];
 
 self.addEventListener('install', (event) => {

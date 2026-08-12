@@ -102,7 +102,7 @@
             插件渲染，也就不再需要 frame-src 允许 blob:——干脆把
             frame-src 整条指令删掉，交给 default-src 'none' 兜底，直接禁止
             本页面被任何来源 <iframe> 嵌入内容，比之前的 'self' blob: 更严格。
-          - worker-src 'self' 用于加载 ./lib/pdf.worker.min.js（pdf.js 的
+          - worker-src 'self' 用于加载 ./lib/pdf.worker.min.mjs（pdf.js 的
             后台线程），vendored 在本地，不引入任何第三方源。
 
        6. connect-src 'self'：应用是离线优先、纯本地存储（IndexedDB），代码里
@@ -138,15 +138,16 @@
   <link rel="shortcut icon" href="favicon.ico">
   <script src="lib/jszip.min.js"></script>
   <!--
-    pdf.js — loaded here (rather than left to app.js) so pdfjsLib exists
-    before app.js runs and configures its worker. Vendored locally at
-    ./lib/pdf.min.js (pdfjs-dist, same build as tax-tracker's copy) rather
-    than a CDN, so script-src can stay 'self' with no CDN origin or SRI
-    hash to keep in sync. Used by the attachment viewer to render PDF
-    pages onto <canvas> instead of handing a blob URL to the browser's own
-    PDF plugin (see openAttachment() in app.js for why).
+    pdf.js is loaded from inside app.js via dynamic import(), not from a
+    <script> tag here - see the pdfjsLibPromise comment in app.js for why
+    (pdfjs-dist 4.x+ only ships ES module builds, and a `type="module"`
+    tag here would race against app.js's own (classic, non-deferred) load
+    order). Vendored locally at ./lib/pdf.min.mjs + ./lib/pdf.worker.min.mjs
+    (pdfjs-dist) rather than a CDN, so script-src can stay 'self' with no
+    CDN origin or SRI hash to keep in sync. Used by the attachment viewer
+    to render PDF pages onto <canvas> instead of handing a blob URL to the
+    browser's own PDF plugin (see openAttachment() in app.js for why).
   -->
-  <script src="lib/pdf.min.js" referrerpolicy="no-referrer"></script>
   <style>
     :root {
       --bg: #f5f7fa;

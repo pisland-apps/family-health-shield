@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v21';
+    const APP_VERSION = 'v22';
     const APP_VERSION_DATE = '2026-08-12';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -16,16 +16,22 @@
     const versionBadgeEl = document.getElementById('versionBadge');
     if (versionBadgeEl) versionBadgeEl.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
 
-    // pdf.js worker — vendored locally at ./lib/pdf.worker.min.js, same
-    // package/version as ./lib/pdf.min.js loaded in index.html. Must stay
-    // in lockstep with that file — mismatched main/worker builds can fail
-    // in confusing ways. Used by openAttachment() to render PDFs onto
-    // <canvas> instead of relying on the browser's own PDF handling
-    // (which renders blank in an <iframe> on some platforms, e.g. Chrome
-    // on Android — see the removed fallback-button comment in git history).
-    if (window.pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
-    }
+    // pdf.js — as of pdfjs-dist 4.x, the package only ships ES module builds
+    // (no more plain-global <script> bundle), so it's loaded here via dynamic
+    // import() rather than a separate <script> tag in index.html. This also
+    // sidesteps an ordering trap: import()/module scripts are always deferred,
+    // but app.js itself is a classic (non-deferred) script placed at the end
+    // of <body> - so a `<script type="module">` for pdf.js could easily end up
+    // running AFTER this file, leaving window.pdfjsLib unset right when it's
+    // needed. Awaiting this promise at the point of use (see openAttachment())
+    // avoids that regardless of any future load-order changes.
+    // Worker vendored locally at ./lib/pdf.worker.min.mjs - must stay in
+    // lockstep with ./lib/pdf.min.mjs's package/version below (mismatched
+    // main/worker builds can fail in confusing ways).
+    const pdfjsLibPromise = import('./lib/pdf.min.mjs').then((mod) => {
+      mod.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.mjs';
+      return mod;
+    });
 
     // Returns YYYY-MM-DD in the browser's LOCAL timezone (not UTC).
     // toISOString() always returns UTC, which is off by a day for anyone
@@ -1591,6 +1597,7 @@
           body.innerHTML = '<div class="s-db2a3573">Loading PDF…</div>';
           try {
             const bytes = new Uint8Array(await blob.arrayBuffer());
+            const pdfjsLib = await pdfjsLibPromise;
             const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
             body.innerHTML = '';
             const containerWidth = body.clientWidth || 700;
