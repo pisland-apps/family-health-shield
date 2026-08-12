@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v20';
-    const APP_VERSION_DATE = '2026-08-10';
+    const APP_VERSION = 'v21';
+    const APP_VERSION_DATE = '2026-08-12';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -305,6 +305,19 @@
     }
     function isBiometricEnrolled() { return !!getBioConfig(); }
 
+    // Separate from BIO_CONFIG_KEY on purpose: this flag tracks whether the
+    // user has been told about a security-driven biometric reset, and needs
+    // to survive independently of whether the (now-deleted) bio record still
+    // exists. Without this, the notice could only ever be shown on the exact
+    // render call that performed the deletion - a force-quit, page reload, or
+    // literally any other UI event overwriting the same text node before the
+    // user reads it would lose the explanation for good, leaving them with a
+    // biometric button that silently vanished.
+    const BIO_MIGRATION_NOTICE_KEY = 'family_health_tracker_v3_bio_migration_notice';
+    function hasPendingMigrationNotice() { return localStorage.getItem(BIO_MIGRATION_NOTICE_KEY) === '1'; }
+    function setPendingMigrationNotice() { localStorage.setItem(BIO_MIGRATION_NOTICE_KEY, '1'); }
+    function clearPendingMigrationNotice() { localStorage.removeItem(BIO_MIGRATION_NOTICE_KEY); }
+
     // Bump whenever HKDF_SALT (or anything else feeding key derivation)
     // changes, so we can tell apart PRF records made before/after the change
     // and safely wipe the ones that were derived with different inputs
@@ -331,6 +344,7 @@
       const outdatedPrf = method === 'prf' && bcfg.hkdfSaltVer !== HKDF_SALT_VERSION;
       if (method === 'gate' || outdatedPrf) {
         await clearBioConfig();
+        setPendingMigrationNotice();
         return true;
       }
       return false;
@@ -355,19 +369,30 @@
     }
 
     // Derives an AES-256-GCM key from a WebAuthn PRF secret via HKDF.
-    // The salt here doesn't need to be secret (HKDF salts never do) - it's a
-    // fixed, app-specific constant, kept separate from `info` purely so we're
-    // not relying on the PRF output being the only source of "randomness" fed
-    // into HKDF-Extract. Safe to hardcode and safe to publish.
-    const HKDF_SALT = new Uint8Array([
-      0x8f, 0x2a, 0x61, 0xe0, 0x3c, 0x9d, 0x74, 0x1b, 0x5e, 0xa8, 0x02, 0xf6,
-      0x39, 0xc4, 0x1d, 0x87, 0xb0, 0x4e, 0x92, 0x6a, 0xd5, 0x11, 0x7c, 0x38,
-      0xef, 0x60, 0x2b, 0x94, 0x18, 0xa3, 0x55, 0xd9
-    ]);
-    async function aesKeyFromPrfSecret(prfBytes) {
+    // Salt/hash live in a versioned config table rather than being inlined
+    // directly into the derivation call, so rotating them later (e.g. if a
+    // compliance requirement changes, or this salt turns out to collide with
+    // some published test vector) is a one-line addition + version bump here,
+    // with no changes needed to the derivation or migration logic - both
+    // already key off HKDF_SALT_VERSION. HKDF salts don't need to be secret;
+    // these are safe to hardcode and safe to publish.
+    const HKDF_CONFIGS = {
+      2: {
+        hash: 'SHA-256',
+        salt: new Uint8Array([
+          0x8f, 0x2a, 0x61, 0xe0, 0x3c, 0x9d, 0x74, 0x1b, 0x5e, 0xa8, 0x02, 0xf6,
+          0x39, 0xc4, 0x1d, 0x87, 0xb0, 0x4e, 0x92, 0x6a, 0xd5, 0x11, 0x7c, 0x38,
+          0xef, 0x60, 0x2b, 0x94, 0x18, 0xa3, 0x55, 0xd9
+        ])
+      }
+      // 3: { hash: 'SHA-256', salt: new Uint8Array([...]) } // next rotation
+    };
+    async function aesKeyFromPrfSecret(prfBytes, saltVer = HKDF_SALT_VERSION) {
+      const config = HKDF_CONFIGS[saltVer];
+      if (!config) throw new Error(`Unknown HKDF salt version: ${saltVer}`);
       const base = await crypto.subtle.importKey('raw', prfBytes, 'HKDF', false, ['deriveKey']);
       return crypto.subtle.deriveKey(
-        { name: 'HKDF', hash: 'SHA-256', salt: HKDF_SALT, info: new TextEncoder().encode('family-health-shield-bio-wrap-v1') },
+        { name: 'HKDF', hash: config.hash, salt: config.salt, info: new TextEncoder().encode('family-health-shield-bio-wrap-v1') },
         base,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -461,6 +486,10 @@
       const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
       const wrapped = await encryptText(passcode, wrapKey);
       setBioConfig({ method: 'prf', credentialId: bufToB64(cred.rawId), prfSalt: bufToB64(prfSalt), hkdfSaltVer: HKDF_SALT_VERSION, wrapped });
+      // A fresh, valid enrollment means the notice (if any) has served its
+      // purpose - the user just proved they saw it by successfully setting
+      // biometric unlock back up.
+      clearPendingMigrationNotice();
     }
 
     // Prompts the biometric sensor and returns the recovered passcode string,
@@ -486,7 +515,7 @@
         const ext = assertion.getClientExtensionResults();
         const prfResult = ext && ext.prf && ext.prf.results && ext.prf.results.first;
         if (!prfResult) return null;
-        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult));
+        const wrapKey = await aesKeyFromPrfSecret(new Uint8Array(prfResult), bcfg.hkdfSaltVer);
         return await decryptText(bcfg.wrapped, wrapKey);
       } catch {
         return null;
@@ -767,12 +796,12 @@
     // full-app lock screen, depending on whether it's enrolled on this device
     // and whether this browser currently supports it.
     async function updateAppLockBioUI() {
-      const migrated = await migrateLegacyBiometric();
+      await migrateLegacyBiometric();
       const enrolled = isBiometricEnrolled();
       const supported = enrolled && await isPlatformAuthenticatorAvailable();
       document.getElementById('btnAppLockBio').style.display = supported ? 'block' : 'none';
       document.getElementById('appLockBioDivider').style.display = supported ? 'block' : 'none';
-      if (migrated) {
+      if (hasPendingMigrationNotice()) {
         document.getElementById('appLockError').textContent =
           'Biometric unlock was reset on this device for security reasons. Enter your passcode below, then you can turn it back on from Security settings.';
       }
@@ -4545,14 +4574,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('securityManageSection').style.display = enabled ? 'block' : 'none';
       if (enabled) {
         document.getElementById('secLockStatus').textContent = isUnlocked() ? '🔓 Currently unlocked' : '🔒 Currently locked';
-        const migrated = await migrateLegacyBiometric();
+        await migrateLegacyBiometric();
         const supported = await isPlatformAuthenticatorAvailable();
         const enrolled = isBiometricEnrolled();
         document.getElementById('bioNotSupported').style.display = supported ? 'none' : 'block';
         document.getElementById('bioEnrollBox').style.display = (supported && !enrolled) ? 'block' : 'none';
         document.getElementById('bioEnabledBox').style.display = (supported && enrolled) ? 'flex' : 'none';
         document.getElementById('bioConfirmPasscode').value = '';
-        document.getElementById('bioSetupError').textContent = migrated
+        document.getElementById('bioSetupError').textContent = hasPendingMigrationNotice()
           ? 'Biometric unlock was reset on this device for security reasons (either it used an older, less secure fallback method, or its underlying key needs to be regenerated). Set it up again below - it will only succeed on devices with full biometric (PRF) support.'
           : '';
       }
