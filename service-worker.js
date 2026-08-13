@@ -21,12 +21,11 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v25';
+const CACHE_VERSION = 'v26';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
   './',
-  './index.html',
   './app.js',
   './manifest.json',
   './icons/icon-192.png',
@@ -37,6 +36,18 @@ const APP_SHELL = [
   './lib/pdf.min.mjs',
   './lib/pdf.worker.min.mjs'
 ];
+// './index.html' is deliberately NOT in this list. Cloudflare Pages
+// redirects /index.html -> / by default (documented behavior for its
+// static hosting; GitHub Pages doesn't do this), so fetching that URL here
+// would silently follow the redirect and cache a Response with
+// redirected: true under the './index.html' key. Chrome enforces a spec
+// rule that a Service Worker cannot answer a *navigation* with a
+// redirected Response - it fails the whole load with net::ERR_FAILED. That
+// poisoned cache entry is exactly what used to make the installed desktop
+// shortcut (whose old start_url was "./index.html" - see manifest.json)
+// fail to (re)launch every single time. Every navigation now resolves
+// through the single canonical './' entry instead - see the dedicated
+// 'navigate' branch in the fetch handler below.
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -49,7 +60,11 @@ self.addEventListener('install', (event) => {
         try {
           const req = new Request(url, { cache: 'reload' });
           const res = await fetch(req);
-          if (res && res.ok) {
+          // Never cache a redirected response under a static app-shell key -
+          // same reasoning as leaving './index.html' out of APP_SHELL above.
+          // Belt-and-suspenders in case any future entry here turns out to
+          // redirect on some host.
+          if (res && res.ok && !res.redirected) {
             await cache.put(url, res);
           }
         } catch (err) {
@@ -81,24 +96,52 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
+  // Navigation requests (actual page loads - including the installed
+  // shortcut's start_url, a bookmark, a manually typed /index.html, etc.)
+  // are handled separately from everything else and ALWAYS resolve through
+  // the single canonical './' entry, regardless of which exact URL was
+  // requested. This is what actually fixes the redirect trap described
+  // above: even a still-installed OLD shortcut whose start_url is the
+  // legacy "./index.html" (people who installed the app before this fix
+  // won't get the new manifest.json applied to their existing shortcut
+  // just from this deploy - only a fresh install picks it up) lands here
+  // and gets served './' instead of ever touching the URL Cloudflare
+  // redirects.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      caches.match('./').then((cached) => {
+        if (cached) return cached;
+        return fetch('./', { cache: 'reload' })
+          .then((res) => {
+            if (res && res.ok && !res.redirected) {
+              const clone = res.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put('./', clone));
+            }
+            return res;
+          })
+          .catch(() => new Response(
+            'You are offline and the app has not finished caching yet. Please connect to the internet once, then reopen the app.',
+            { status: 503, statusText: 'Offline', headers: { 'Content-Type': 'text/plain' } }
+          ));
+      })
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
       return fetch(event.request)
         .then((res) => {
           // Opportunistically cache same-origin GETs we haven't seen yet.
-          if (res && res.ok && event.request.url.startsWith(self.location.origin)) {
+          // !res.redirected guard: same reasoning as the install step above.
+          if (res && res.ok && !res.redirected && event.request.url.startsWith(self.location.origin)) {
             const clone = res.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
           }
           return res;
         })
-        .catch(() => {
-          if (event.request.mode === 'navigate') {
-            return caches.match('./index.html');
-          }
-          return new Response('Offline and not cached.', { status: 503, statusText: 'Offline' });
-        });
+        .catch(() => new Response('Offline and not cached.', { status: 503, statusText: 'Offline' }));
     })
   );
 });

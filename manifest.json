@@ -2,7 +2,7 @@
   "name": "Family Health & Shield",
   "short_name": "Health & Shield",
   "description": "Family health records and insurance tracker with on-device encryption.",
-  "start_url": "./index.html",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",
