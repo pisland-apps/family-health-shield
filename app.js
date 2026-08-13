@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v24';
-    const APP_VERSION_DATE = '2026-08-12';
+    const APP_VERSION = 'v25';
+    const APP_VERSION_DATE = '2026-08-13';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -271,6 +271,27 @@
     function isEncryptionEnabled() { const cfg = getCryptoConfig(); return !!(cfg && cfg.enabled); }
     function isUnlocked() { return !!cryptoKey; }
 
+    // Independent record of the user's last DELIBERATE encryption choice on
+    // this device, separate from CRYPTO_CONFIG_KEY itself. Only ever written
+    // in exactly two places: right after cryptoSetup() succeeds ('enabled'),
+    // and right after the confirm()-gated "Disable Encryption" Settings
+    // action completes ('disabled'). No other code path touches this key -
+    // not import, not the PBKDF2 migration, not any error handler.
+    //
+    // Why this exists: init() decides whether to show the lock screen using
+    // ONLY getCryptoConfig().enabled. If that ever comes back empty/false
+    // for a reason OTHER than the deliberate disable flow above (a browser
+    // storage anomaly, a future bug, anything) - init() would currently fall
+    // straight through to initAppData() and render whatever's in
+    // localStorage with no passcode prompt at all, since that's exactly what
+    // "encryption is off" is supposed to look like. This sentinel lets init()
+    // tell the difference between "encryption was intentionally turned off"
+    // and "encryption config vanished unexpectedly" and warn loudly in the
+    // second case instead of silently proceeding either way.
+    const CRYPTO_INTENT_KEY = 'family_health_tracker_v3_crypto_intent';
+    function setCryptoIntent(state) { try { localStorage.setItem(CRYPTO_INTENT_KEY, state); } catch {} }
+    function getCryptoIntent() { try { return localStorage.getItem(CRYPTO_INTENT_KEY); } catch { return null; } }
+
     function bufToB64(buf) {
       // Chunked conversion - converting large buffers (e.g. an encrypted photo)
       // one character at a time via string concatenation is catastrophically
@@ -340,6 +361,7 @@
       const key = await deriveKeyFromPasscode(passcode, saltB64); // always uses PBKDF2_CONFIGS[PBKDF2_ITER_VERSION] - a brand-new setup has no legacy config to preserve
       const verifier = await encryptText('verify-ok', key);
       setCryptoConfig({ enabled: true, salt: saltB64, verifier, iterVer: PBKDF2_ITER_VERSION });
+      setCryptoIntent('enabled');
       cryptoKey = key;
     }
 
@@ -595,7 +617,13 @@
     async function enrollBiometric(passcode) {
       const cfg = getCryptoConfig();
       if (!cfg || !cfg.enabled) throw new Error('Enable encryption first.');
-      const testKey = await deriveKeyFromPasscode(passcode, cfg.salt);
+      // Must derive with whatever iteration count this vault's key actually
+      // uses right now (cfg.iterVer, defaulting to legacy version 1) - same
+      // reasoning as cryptoUnlock() and the import fix above. Defaulting to
+      // the current/highest count here would silently produce the wrong key
+      // and reject a correct passcode on any vault that hasn't been through
+      // migratePbkdf2Iterations() yet.
+      const testKey = await deriveKeyFromPasscode(passcode, cfg.salt, PBKDF2_CONFIGS[cfg.iterVer || 1]);
       let check;
       try { check = await decryptText(cfg.verifier, testKey); } catch { check = null; }
       if (check !== 'verify-ok') throw new Error('Incorrect passcode.');
@@ -966,10 +994,34 @@
     function init() {
       const cfg = getCryptoConfig();
       if (cfg && cfg.enabled) {
+        // Backfill for devices that enabled encryption before this sentinel
+        // existed - from this point on their intent is correctly tracked too.
+        if (getCryptoIntent() !== 'enabled') setCryptoIntent('enabled');
         // Data is encrypted at rest - block the whole app until the passcode is verified.
         document.getElementById('appLockScreen').style.display = 'flex';
         setTimeout(() => document.getElementById('appLockPasscodeInput').focus(), 50);
         updateAppLockBioUI();
+      } else if (getCryptoIntent() === 'enabled') {
+        // Encryption's own config is missing/disabled, but the last
+        // DELIBERATE choice recorded on this device was "enabled," and
+        // that record is only ever changed by the confirm()-gated Disable
+        // Encryption action (which would have set it to 'disabled'). This
+        // combination should be impossible through normal use - warn
+        // loudly rather than silently rendering whatever's in localStorage
+        // (which, with encryption off, is plaintext) with no passcode
+        // prompt at all. Still proceed afterward rather than hard-locking
+        // the person out with no path forward - see the comment on
+        // CRYPTO_INTENT_KEY above for the reasoning.
+        alert(
+          '⚠️ Encryption settings could not be found on this device, even ' +
+          'though encryption was previously turned on here. Your data may ' +
+          'now be loading unencrypted.\n\n' +
+          'This should not happen during normal use. If you did not ' +
+          'deliberately disable encryption in Settings, please check ' +
+          'Settings → Security once the app loads, and consider restoring ' +
+          'from a recent backup to be safe.'
+        );
+        initAppData();
       } else {
         initAppData();
       }
@@ -3095,10 +3147,17 @@
 
       let exportKey = null;
       let exportSalt = null;
+      let exportIterVer = null;
       if (encrypt) {
         if (appReady) {
           exportKey = cryptoKey;
-          exportSalt = getCryptoConfig().salt;
+          const cfg = getCryptoConfig();
+          exportSalt = cfg.salt;
+          // Whatever iteration count actually produced cryptoKey right now -
+          // could still be the legacy count if this vault hasn't gone
+          // through migratePbkdf2Iterations() yet. Must match exactly, or
+          // import will derive the wrong key from this file.
+          exportIterVer = cfg.iterVer || 1;
         } else {
           const p1 = document.getElementById('exportPasscode1').value;
           const p2 = document.getElementById('exportPasscode2').value;
@@ -3106,15 +3165,16 @@
           if (p1 !== p2) { errEl.textContent = 'Passcodes do not match.'; return; }
           const saltBytes = crypto.getRandomValues(new Uint8Array(16));
           exportSalt = bufToB64(saltBytes);
-          exportKey = await deriveKeyFromPasscode(p1, exportSalt);
+          exportIterVer = PBKDF2_ITER_VERSION; // fresh salt each export -> always safe to use the current/strongest count
+          exportKey = await deriveKeyFromPasscode(p1, exportSalt, PBKDF2_CONFIGS[exportIterVer]);
         }
       }
 
       document.getElementById('exportOptionsModal').classList.remove('active');
       try {
-        if (pendingExportType === 'all') await exportData(encrypt, exportKey, exportSalt);
-        else if (pendingExportType === 'member') await exportMember(encrypt, exportKey, exportSalt);
-        else if (pendingExportType === 'zip') await packZip(encrypt, exportKey, exportSalt);
+        if (pendingExportType === 'all') await exportData(encrypt, exportKey, exportSalt, exportIterVer);
+        else if (pendingExportType === 'member') await exportMember(encrypt, exportKey, exportSalt, exportIterVer);
+        else if (pendingExportType === 'zip') await packZip(encrypt, exportKey, exportSalt, exportIterVer);
       } catch (err) {
         alert('Export failed: ' + err.message);
       }
@@ -3123,21 +3183,26 @@
     // Wraps JSON text in a self-describing encrypted envelope (carries its own
     // salt, so the file can be decrypted on ANY device given the right
     // passcode - it isn't tied to this device's own Security setup).
-    async function buildExportPayload(jsonString, encrypt, key, salt) {
+    // iterVer records which PBKDF2_CONFIGS entry the key was derived with, so
+    // a future import (possibly after PBKDF2_ITER_VERSION has been bumped
+    // again) still derives the SAME key this file was actually encrypted
+    // with, instead of silently trying the current/default iteration count
+    // and failing with what looks like "wrong passcode."
+    async function buildExportPayload(jsonString, encrypt, key, salt, iterVer) {
       if (!encrypt) return jsonString;
       const payload = await encryptText(jsonString, key);
-      return JSON.stringify({ encryptedBackup: true, version: 1, salt, payload });
+      return JSON.stringify({ encryptedBackup: true, version: 1, salt, iterVer, payload });
     }
 
 
-    async function exportMember(encrypt, key, salt) {
+    async function exportMember(encrypt, key, salt, iterVer) {
       if (!currentMemberId) {
         alert('Please select a member first');
         return;
       }
       const m = members.find(x => x.id === currentMemberId);
       const inflated = await inflateMembersForExport([m]);
-      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt);
+      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -3147,9 +3212,9 @@
       URL.revokeObjectURL(url);
     }
 
-    async function exportData(encrypt, key, salt) {
+    async function exportData(encrypt, key, salt, iterVer) {
       const inflated = await inflateMembersForExport(members);
-      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt);
+      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -3331,7 +3396,15 @@
       const pass = document.getElementById('importPasscodeInput').value;
       const { envelope, resolve } = importPasscodeResolver;
       try {
-        const key = await deriveKeyFromPasscode(pass, envelope.salt);
+        // Files exported before this fix (or by the version of the app that
+        // was live before this deploy) have no iterVer field at all - treat
+        // those as version 1 (this app's original hardcoded 150,000), same
+        // convention as cfg.iterVer for the main vault. Using the WRONG
+        // iteration count here derives a completely different key from the
+        // correct passcode and decryption fails - indistinguishable from an
+        // actually-wrong passcode, which is exactly the bug this fixes.
+        const iterVer = envelope.iterVer || 1;
+        const key = await deriveKeyFromPasscode(pass, envelope.salt, PBKDF2_CONFIGS[iterVer]);
         const decrypted = await decryptText(envelope.payload, key);
         document.getElementById('importPasscodeModal').classList.remove('active');
         importPasscodeResolver = null;
@@ -3349,7 +3422,7 @@
     });
 
     // ========== PACK ZIP ==========
-    async function packZip(encrypt, key, salt) {
+    async function packZip(encrypt, key, salt, iterVer) {
       if (typeof JSZip === 'undefined') {
         alert('JSZip library failed to load. Check internet connection.');
         return;
@@ -3361,7 +3434,7 @@
       zip.file('family_health_and_shield.html', htmlContent);
 
       const inflated = await inflateMembersForExport(members);
-      const backupJson = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt);
+      const backupJson = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
       zip.file(`backup/family_health_backup${encrypt ? '_encrypted' : ''}.json`, backupJson);
 
       zip.folder('attachments');
@@ -4817,6 +4890,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!(await ensureUnlocked())) return;
       await reencryptAllAttachments(false);
       localStorage.removeItem(CRYPTO_CONFIG_KEY);
+      setCryptoIntent('disabled');
       await clearBioConfig(); // biometric unlock is meaningless without a passcode-derived key behind it
       cryptoLock();
       saveData(); // re-writes the main health + insurance data blob as plaintext
