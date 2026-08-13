@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-QUn+0G1I6fmMyoVZR/wlCYhE3x32+JsJAx9xGN4uwDg=';
+    style-src 'self' 'sha256-+98ZIChUaChcRDPl5WyZm+D3YY02H7O0cA+uukeRPPQ=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -571,6 +571,22 @@
        an unsupported browser, not encryption strength (the actual encryption is unaffected;
        this is purely a visual masking / browser-heuristic concern). */
     .s-passcode-mask { -webkit-text-security: disc; text-security: disc; }
+    /* On-screen numpad for the two "enter your existing passcode" screens
+       (app lock screen + attachment unlock modal). Paired with
+       inputmode="none" on the passcode <input> above, which stops the OS
+       virtual keyboard from popping up when that field gets focus/programmatic
+       value changes -- tapping a numpad button never calls .focus() on the
+       input, it only writes to .value, so the keyboard stays down on mobile.
+       The ⌨️ button flips inputmode back to text and focuses the input, for
+       the (uncommon but supported) case of a passcode containing letters. */
+    .numpad { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin: 2px 0 16px; }
+    .numpad-btn { padding:16px 0; font-size:22px; font-weight:600; line-height:1; border-radius:10px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; touch-action:manipulation; -webkit-tap-highlight-color:transparent; user-select:none; }
+    .numpad-btn:active { background:var(--primary-light); border-color:var(--primary); }
+    .numpad-btn-action { font-size:17px; color:var(--text-secondary); background:var(--bg); }
+    @media (min-width: 480px) {
+      .numpad-btn { padding:20px 0; font-size:26px; }
+      .numpad-btn-action { font-size:19px; }
+    }
     .s-ledger-row { transition: background-color 0.4s ease; }
     .s-ledger-flash { background-color: var(--primary-light, #dbeafe) !important; }
     .s-quotafill { height:100%; border-radius:999px; }
@@ -594,7 +610,21 @@
       <h2 class="s-bdfc2dc5">Family Health & Shield is Locked</h2>
       <p class="s-02225414">Enter your passcode to unlock your data.</p>
       <div class="form-group">
-        <input type="text" class="form-input s-passcode-mask" id="appLockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <input type="text" class="form-input s-passcode-mask" id="appLockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="none">
+      </div>
+      <div class="numpad" id="appLockNumpad">
+        <button type="button" class="numpad-btn" data-numpad-digit="1">1</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="2">2</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="3">3</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="4">4</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="5">5</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="6">6</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="7">7</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="8">8</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="9">9</button>
+        <button type="button" class="numpad-btn numpad-btn-action" id="appLockNumpadToggle" title="Passcode has letters? Switch to keyboard">⌨️</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="0">0</button>
+        <button type="button" class="numpad-btn numpad-btn-action" id="appLockNumpadBackspace" title="Backspace">⌫</button>
       </div>
       <div id="appLockError" class="s-0100dc7f"></div>
       <button class="btn btn-primary s-8588e44d" id="btnAppLockUnlock">Unlock</button>
@@ -923,7 +953,21 @@
       <button class="btn btn-secondary s-50204300" id="btnBioUnlock">🫆 Unlock with Face ID / Fingerprint</button>
       <div id="bioUnlockDivider" class="s-79e8385f">or enter passcode</div>
       <div class="form-group">
-        <input type="text" class="form-input s-passcode-mask" id="unlockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <input type="text" class="form-input s-passcode-mask" id="unlockPasscodeInput" placeholder="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="none">
+      </div>
+      <div class="numpad" id="unlockNumpad">
+        <button type="button" class="numpad-btn" data-numpad-digit="1">1</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="2">2</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="3">3</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="4">4</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="5">5</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="6">6</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="7">7</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="8">8</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="9">9</button>
+        <button type="button" class="numpad-btn numpad-btn-action" id="unlockNumpadToggle" title="Passcode has letters? Switch to keyboard">⌨️</button>
+        <button type="button" class="numpad-btn" data-numpad-digit="0">0</button>
+        <button type="button" class="numpad-btn numpad-btn-action" id="unlockNumpadBackspace" title="Backspace">⌫</button>
       </div>
       <div id="unlockError" class="s-e36c2361"></div>
       <div class="modal-actions">

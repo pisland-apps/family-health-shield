@@ -811,6 +811,7 @@
         document.getElementById('unlockPasscodeInput').value = '';
         document.getElementById('unlockError').textContent = '';
         document.getElementById('unlockModal').classList.add('active');
+        if (resetUnlockNumpad) resetUnlockNumpad();
         setTimeout(() => document.getElementById('unlockPasscodeInput').focus(), 50);
         updateUnlockModalBioUI();
       });
@@ -988,6 +989,68 @@
       }
     }
 
+    // ========== ON-SCREEN NUMPAD (app lock screen + attachment unlock modal) ==========
+    // Wires a big touch-friendly numpad to a passcode <input>, for mobile/tablet
+    // users who'd otherwise have to fight the OS's cramped default keyboard.
+    // The input keeps inputmode="none" (set in the HTML) so tapping it directly
+    // does not pop up the on-screen keyboard; numpad buttons only ever write to
+    // input.value, never call .focus(), so the keyboard stays down on mobile
+    // regardless. Passcodes aren't restricted to digits (see secPasscode
+    // validation - just "at least 6 characters"), so a small ⌨️ toggle switches
+    // the field back to normal free-text keyboard entry for anyone whose
+    // passcode has letters/symbols in it, and back again.
+    function wirePasscodeNumpad(inputId, numpadId, toggleId, backspaceId) {
+      const input = document.getElementById(inputId);
+      const numpad = document.getElementById(numpadId);
+      const toggleBtn = document.getElementById(toggleId);
+      const backspaceBtn = document.getElementById(backspaceId);
+      if (!input || !numpad || !toggleBtn || !backspaceBtn) return;
+
+      let keyboardMode = false;
+
+      function appendChar(ch) {
+        input.value += ch;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      function backspace() {
+        input.value = input.value.slice(0, -1);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      function setKeyboardMode(on) {
+        keyboardMode = on;
+        if (on) {
+          input.removeAttribute('inputmode');
+          numpad.classList.add('s-hidden');
+          toggleBtn.textContent = '🔢';
+          toggleBtn.title = 'Switch back to number pad';
+          input.focus();
+        } else {
+          input.setAttribute('inputmode', 'none');
+          numpad.classList.remove('s-hidden');
+          toggleBtn.textContent = '⌨️';
+          toggleBtn.title = 'Passcode has letters? Switch to keyboard';
+        }
+      }
+
+      numpad.querySelectorAll('[data-numpad-digit]').forEach((btn) => {
+        btn.addEventListener('click', () => appendChar(btn.getAttribute('data-numpad-digit')));
+      });
+      backspaceBtn.addEventListener('click', backspace);
+      toggleBtn.addEventListener('click', () => setKeyboardMode(!keyboardMode));
+
+      // Reset to numpad mode whenever the screen/modal holding this input is
+      // (re)shown, so a previous keyboard-mode choice doesn't leak into the
+      // next unlock attempt.
+      return () => setKeyboardMode(false);
+    }
+
+    const resetAppLockNumpad = wirePasscodeNumpad(
+      'appLockPasscodeInput', 'appLockNumpad', 'appLockNumpadToggle', 'appLockNumpadBackspace'
+    );
+    const resetUnlockNumpad = wirePasscodeNumpad(
+      'unlockPasscodeInput', 'unlockNumpad', 'unlockNumpadToggle', 'unlockNumpadBackspace'
+    );
+
     // ========== INIT ==========
     let membersLoaded = false;
 
@@ -999,6 +1062,7 @@
         if (getCryptoIntent() !== 'enabled') setCryptoIntent('enabled');
         // Data is encrypted at rest - block the whole app until the passcode is verified.
         document.getElementById('appLockScreen').style.display = 'flex';
+        if (resetAppLockNumpad) resetAppLockNumpad();
         setTimeout(() => document.getElementById('appLockPasscodeInput').focus(), 50);
         updateAppLockBioUI();
       } else if (getCryptoIntent() === 'enabled') {
@@ -1087,6 +1151,7 @@
     function relockApp() {
       cryptoLock();
       document.getElementById('appLockScreen').style.display = 'flex';
+      if (resetAppLockNumpad) resetAppLockNumpad();
       setTimeout(() => document.getElementById('appLockPasscodeInput').focus(), 50);
       updateAppLockBioUI();
     }
