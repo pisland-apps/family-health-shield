@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v29';
+    const APP_VERSION = 'v30';
     const APP_VERSION_DATE = '2026-09-07';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -746,6 +746,7 @@
           (m.insurance.policies || []).forEach(p => {
             (p.attachments || []).forEach(a => { if (a.id) ids.push(a.id); });
             (p.ledger || []).forEach(l => (l.attachments || []).forEach(a => { if (a.id) ids.push(a.id); }));
+            (p.surrenderRecords || []).forEach(r => (r.attachments || []).forEach(a => { if (a.id) ids.push(a.id); }));
           });
         }
       });
@@ -3594,6 +3595,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     let insTempCoverages = [];
     let insTempAttachments = [];
     let insTempLedgerAttachments = [];
+    let insTempSurrenderAttachments = [];
     let insCurrentLedgerPolicyId = null;
     let insCurrentSurrenderPolicyId = null;
     let insCurrentSumHistoryPolicyId = null;
@@ -4509,6 +4511,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('insSNonGuaranteed').value = '';
       document.getElementById('insBtnAddSurrenderEntry').textContent = '+ Add Statement Record';
       document.getElementById('insBtnCancelSurrenderEdit').style.display = 'none';
+      insTempSurrenderAttachments = [];
+      insRenderSurrenderAttachmentPreview();
     }
     function insRenderSurrenderList(p) {
       const currentEl = document.getElementById('insSurrenderCurrent');
@@ -4534,8 +4538,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="s-ebc463b1">
             Bonus ${insFmtMoney(r.accumulatedBonus)} · Investment Fund Value ${insFmtMoney(r.dividend)} · Guaranteed ${insFmtMoney(r.guaranteedCashValue)} · Non-Guaranteed ${insFmtMoney(r.nonGuaranteedValue)}
           </div>
+          ${(r.attachments && r.attachments.length) ? `<div class="s-bb680ec5">${r.attachments.map((att, idx) => `<span data-ins-open-surrender-att="${escapeHtml(r.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
         </div>
       `).join('');
+      container.querySelectorAll('[data-ins-open-surrender-att]').forEach(el => el.addEventListener('click', () => {
+        const r = p.surrenderRecords.find(x => x.id === el.dataset.insOpenSurrenderAtt);
+        const att = r && r.attachments ? r.attachments[parseInt(el.dataset.insAttIdx)] : null;
+        openAttachment(att);
+      }));
       container.querySelectorAll('[data-ins-edit-surrender]').forEach(el => el.addEventListener('click', () => {
         const r = p.surrenderRecords.find(x => x.id === el.dataset.insEditSurrender);
         if (!r) return;
@@ -4548,6 +4558,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         document.getElementById('insSNonGuaranteed').value = r.nonGuaranteedValue ?? '';
         document.getElementById('insBtnAddSurrenderEntry').textContent = 'Update Statement Record';
         document.getElementById('insBtnCancelSurrenderEdit').style.display = 'inline-block';
+        insTempSurrenderAttachments = r.attachments ? r.attachments.map(a => ({ ...a })) : [];
+        insRenderSurrenderAttachmentPreview();
+        document.getElementById('insSurrenderFormTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
       }));
       container.querySelectorAll('[data-ins-remove-surrender]').forEach(el => el.addEventListener('click', () => {
         if (!confirm('Delete this statement record? This cannot be undone.')) return;
@@ -4559,9 +4572,10 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         insRenderSurrenderList(p); renderMain();
       }));
     }
-    document.getElementById('insBtnAddSurrenderEntry').addEventListener('click', () => {
+    document.getElementById('insBtnAddSurrenderEntry').addEventListener('click', async () => {
       const date = document.getElementById('insSDate').value;
       if (!date) { alert('Please enter the statement date'); return; }
+      if (!(await ensureUnlocked())) return;
       const m = members.find(x => x.id === currentMemberId);
       const p = m.insurance.policies.find(x => x.id === insCurrentSurrenderPolicyId);
       if (!p.surrenderRecords) p.surrenderRecords = [];
@@ -4570,7 +4584,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         accumulatedBonus: document.getElementById('insSBonus').value,
         dividend: document.getElementById('insSDividend').value,
         guaranteedCashValue: document.getElementById('insSGuaranteed').value,
-        nonGuaranteedValue: document.getElementById('insSNonGuaranteed').value
+        nonGuaranteedValue: document.getElementById('insSNonGuaranteed').value,
+        attachments: await persistAttachmentsToIdb(insTempSurrenderAttachments)
       };
       if (insEditingSurrenderId) {
         const r = p.surrenderRecords.find(x => x.id === insEditingSurrenderId);
@@ -4584,6 +4599,47 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     });
     document.getElementById('insBtnCancelSurrenderEdit').addEventListener('click', insResetSurrenderForm);
     document.getElementById('insBtnCloseSurrender').addEventListener('click', () => document.getElementById('insSurrenderModal').classList.remove('active'));
+
+    // Statement record attachments (statement / proof documents)
+    document.getElementById('insSFileDropArea').addEventListener('click', async () => { if (await ensureUnlocked()) document.getElementById('insSAttachments').click(); });
+    document.getElementById('insSAttachments').addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files);
+      for (const file of files) {
+        const isImage = file.type.startsWith('image/');
+        const isPdf = file.type === 'application/pdf';
+        if (!isImage && !isPdf) continue;
+        const data = isImage ? await readImageResized(file) : await readFileAsDataUrl(file);
+        if (!data) { alert(`Couldn't read "${file.name}" - it wasn't added.`); continue; }
+        const thumb = isImage ? await readImageThumb(file) : null;
+        insTempSurrenderAttachments.push({ name: file.name, path: `${ATTACHMENTS_FOLDER}/surrender/${file.name.replace(/[^a-zA-Z0-9_.-]/g, '_')}`, type: isImage ? 'image' : 'pdf', data, thumb, size: data.length });
+        insRenderSurrenderAttachmentPreview();
+      }
+      e.target.value = '';
+    });
+    function insRenderSurrenderAttachmentPreview() {
+      const preview = document.getElementById('insSAttachmentPreview');
+      preview.innerHTML = insTempSurrenderAttachments.map((att, idx) => {
+        const previewSrc = att.thumb || att.data;
+        return `
+        <div class="attachment-item">
+          <div class="attachment-thumb">
+            ${att.type === 'image' && previewSrc ? `<img src="${previewSrc}" alt="">` : `<span>${att.type === 'image' ? '🖼️' : '📄'}</span>`}
+          </div>
+          <div class="attachment-info">
+            <div class="attachment-name">${escapeHtml(att.name)}</div>
+            <div class="attachment-path">${att.size ? formatBytes(att.size) : ''}</div>
+          </div>
+          <span class="attachment-remove" data-idx="${idx}">Remove</span>
+        </div>
+      `;
+      }).join('');
+      preview.querySelectorAll('.attachment-remove').forEach(btn => {
+        btn.addEventListener('click', function() {
+          insTempSurrenderAttachments.splice(parseInt(this.dataset.idx), 1);
+          insRenderSurrenderAttachmentPreview();
+        });
+      });
+    }
 
     // ===== Sum Insured History modal (Reducing Term) =====
     let insEditingSumHistoryId = null;
