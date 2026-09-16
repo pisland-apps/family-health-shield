@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v30';
+    const APP_VERSION = 'v31';
     const APP_VERSION_DATE = '2026-09-07';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -3261,6 +3261,14 @@
     }
 
 
+    // Wraps an inflated member array with a marker saying whether this file is a
+    // full-family backup ('all') or a single-member export ('member'). Import
+    // uses this to decide whether it's safe to merge just one member's data in
+    // (member exports) or whether the whole family must be replaced (backups).
+    function buildExportEnvelope(inflatedMembers, exportType) {
+      return { fhsExportType: exportType, exportedAt: new Date().toISOString(), members: inflatedMembers };
+    }
+
     async function exportMember(encrypt, key, salt, iterVer) {
       if (!currentMemberId) {
         alert('Please select a member first');
@@ -3268,7 +3276,8 @@
       }
       const m = members.find(x => x.id === currentMemberId);
       const inflated = await inflateMembersForExport([m]);
-      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
+      const envelope = buildExportEnvelope(inflated, 'member');
+      const data = await buildExportPayload(JSON.stringify(envelope, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -3280,7 +3289,8 @@
 
     async function exportData(encrypt, key, salt, iterVer) {
       const inflated = await inflateMembersForExport(members);
-      const data = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
+      const envelope = buildExportEnvelope(inflated, 'all');
+      const data = await buildExportPayload(JSON.stringify(envelope, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -3288,6 +3298,22 @@
       a.download = `FamilyHealthShield_Backup_${localDateStr()}${encrypt ? '_encrypted' : ''}.json`;
       a.click();
       URL.revokeObjectURL(url);
+    }
+
+    // Unwraps an imported file into { exportType, rawMembers }. New exports carry
+    // an explicit fhsExportType ('member' or 'all'); older exports made before
+    // this distinction existed are a bare array with no envelope, and are always
+    // treated as 'all' so their import behavior is unchanged (full replace) -
+    // there's no reliable way to tell an old single-member export from an old
+    // full backup of a one-person family, so we don't guess.
+    function parseImportEnvelope(parsed) {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.members)) {
+        return { exportType: parsed.fhsExportType === 'member' ? 'member' : 'all', rawMembers: parsed.members };
+      }
+      if (Array.isArray(parsed)) {
+        return { exportType: 'all', rawMembers: parsed };
+      }
+      throw new Error('Expected a JSON array of family members, or a Family Health Shield export file.');
     }
 
     // Validates and normalizes imported data so a malformed or foreign JSON
@@ -3367,6 +3393,37 @@
       return memberList;
     }
 
+    // Merges a single-member export into the existing family, matched by id -
+    // unlike a full backup import, this never replaces the whole `members`
+    // array, so every OTHER family member is left completely untouched. A
+    // matching id updates that member in place; no match (e.g. re-importing
+    // onto a fresh device, or someone renamed/lost their original) offers to
+    // add them as a new member instead of silently discarding the file.
+    async function mergeImportedMembers(normalized) {
+      for (const incoming of normalized) {
+        const idx = members.findIndex(x => x.id === incoming.id);
+        const isUpdate = idx !== -1;
+        const label = isUpdate
+          ? `Update "${incoming.name}" using this file?\n\nThis replaces that member's own records, insurance, etc. with the imported version. Other family members are not affected.`
+          : `"${incoming.name}" doesn't match any current family member.\n\nAdd them as a new member from this file?`;
+        if (!confirm(label)) continue;
+        const previousMembers = members;
+        const [migrated] = await migrateMemberAttachmentsToIdb([incoming]);
+        const nextMembers = [...members];
+        if (isUpdate) nextMembers[idx] = migrated; else nextMembers.push(migrated);
+        members = nextMembers;
+        if (!saveData()) {
+          members = previousMembers;
+          alert(`Couldn't save the imported data for "${incoming.name}" - storage may be full.`);
+          continue;
+        }
+        currentMemberId = migrated.id;
+        currentTab = 'overview';
+      }
+      renderMemberList();
+      renderMain();
+    }
+
     async function extractJsonFromZip(file) {
       if (typeof JSZip === 'undefined') {
         throw new Error('ZIP support (JSZip) failed to load - check your connection and try again, or extract the ZIP manually and import the .json file inside.');
@@ -3409,16 +3466,28 @@
           }
         }
 
-        let normalized;
+        let envelope;
         try {
-          normalized = normalizeImportedMembers(parsed);
+          envelope = parseImportEnvelope(parsed);
         } catch(err) {
           alert('Invalid file format: ' + err.message);
           e.target.value = '';
           return;
         }
 
-        if (confirm(`Import will replace current ${members.length} members with ${normalized.length} imported member(s). Continue?`)) {
+        let normalized;
+        try {
+          normalized = normalizeImportedMembers(envelope.rawMembers);
+        } catch(err) {
+          alert('Invalid file format: ' + err.message);
+          e.target.value = '';
+          return;
+        }
+
+        if (envelope.exportType === 'member') {
+          // Single-member export: merge in by id, touching only that member.
+          await mergeImportedMembers(normalized);
+        } else if (confirm(`Import will replace current ${members.length} members with ${normalized.length} imported member(s). Continue?`)) {
           const previousMembers = members;
           normalized = await migrateMemberAttachmentsToIdb(normalized);
           members = normalized;
@@ -3500,7 +3569,8 @@
       zip.file('family_health_and_shield.html', htmlContent);
 
       const inflated = await inflateMembersForExport(members);
-      const backupJson = await buildExportPayload(JSON.stringify(inflated, null, 2), encrypt, key, salt, iterVer);
+      const envelope = buildExportEnvelope(inflated, 'all');
+      const backupJson = await buildExportPayload(JSON.stringify(envelope, null, 2), encrypt, key, salt, iterVer);
       zip.file(`backup/family_health_backup${encrypt ? '_encrypted' : ''}.json`, backupJson);
 
       zip.folder('attachments');
