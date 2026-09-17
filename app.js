@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v34';
+    const APP_VERSION = 'v35';
     const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -314,6 +314,18 @@
     // diff-before-bump discipline, so re-saving a policy with no real
     // changes to a given coverage/rider doesn't manufacture a fake
     // conflict later). Items with no matching prior id are new -> freshSyncMeta().
+    // For sub-entities that get rebuilt as a whole array on each save (policy
+    // coverages/riders, edited via a temp array and committed together) -
+    // matches newArr items to priorArr by id, carries forward
+    // version/deletedAt/schemaVersion, and bumps version only if the
+    // non-metadata content actually changed (mirrors bumpFieldVersions'
+    // diff-before-bump discipline, so re-saving a policy with no real
+    // changes to a given coverage/rider doesn't manufacture a fake
+    // conflict later). Items with no matching prior id are new -> freshSyncMeta().
+    // Returns a NEW array - not just newArr mutated - because an existing
+    // item the user removed from the temp editing array (i.e. present in
+    // priorArr but missing from newArr) is soft-deleted and put BACK into
+    // the result as a tombstone, rather than allowed to physically vanish.
     function syncStampSubEntities(priorArr, newArr) {
       const priorById = new Map((priorArr || []).map(x => [x.id, x]));
       const stripMeta = obj => {
@@ -321,7 +333,9 @@
         delete c.version; delete c.deletedAt; delete c.schemaVersion; delete c.updatedAt;
         return c;
       };
-      (newArr || []).forEach(item => {
+      const seenIds = new Set();
+      const result = (newArr || []).map(item => {
+        seenIds.add(item.id);
         const prior = priorById.get(item.id);
         if (prior) {
           item.version = prior.version;
@@ -332,8 +346,49 @@
         } else {
           Object.assign(item, freshSyncMeta());
         }
+        return item;
       });
-      return newArr;
+      (priorArr || []).forEach(prior => {
+        if (seenIds.has(prior.id)) return;
+        if (prior.deletedAt) { result.push(prior); return; } // already tombstoned - keep, per 1.8 (permanent)
+        result.push(tombstone({ ...prior }));
+      });
+      return result;
+    }
+
+
+    // Attachment-array equivalent of syncStampSubEntities, but simpler:
+    // attachments are immutable once uploaded (id + tombstone only, no
+    // version - see design 1.9), so this only needs to catch items removed
+    // from the temp editing array and turn them into tombstones instead of
+    // letting them silently vanish on save.
+    function syncStampAttachments(priorArr, newArr) {
+      const seenIds = new Set((newArr || []).map(a => a.id));
+      const result = [...(newArr || [])];
+      (priorArr || []).forEach(prior => {
+        if (seenIds.has(prior.id)) return;
+        result.push(prior.deletedAt ? prior : { ...prior, deletedAt: nowIso() });
+      });
+      return result;
+    }
+
+    // the app displays/consumes a list rather than editing a specific known
+    // entity. Deletion is now soft (writes deletedAt) rather than splicing,
+    // per design 1.8/2.5 - every read site that shows a list to the user
+    // needs to filter through this or a tombstoned entry will "come back"
+    // in that view even though it was deleted.
+    function live(arr) {
+      return (arr || []).filter(x => !x || !x.deletedAt);
+    }
+
+    // Soft-deletes an entity: writes deletedAt + bumps version, instead of
+    // splicing it out of its array. See design 1.7/1.8/2.5. Call this from
+    // every delete action instead of Array#splice/#filter-out.
+    function tombstone(entity) {
+      if (!entity) return entity;
+      entity.deletedAt = nowIso();
+      bumpVersion(entity);
+      return entity;
     }
 
     // existing (pre-merge-sync-feature) member data: called once at load
@@ -1581,11 +1636,12 @@
     function renderMemberList() {
       updateStorageMeter();
       const list = document.getElementById('memberList');
-      if (members.length === 0) {
+      const liveMembers = live(members);
+      if (liveMembers.length === 0) {
         list.innerHTML = '<div class="s-3d9b1e10">No members yet<br>Click below to add</div>';
         return;
       }
-      list.innerHTML = members.map(m => {
+      list.innerHTML = liveMembers.map(m => {
         const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
         return `
           <div class="member-item ${m.id === currentMemberId ? 'active' : ''}" data-id="${escapeHtml(m.id)}">
@@ -2456,8 +2512,10 @@
       if (!m) return;
       if (!confirm('Delete this reminder?')) return;
       const previousReminders = [...(m.customReminders || [])];
-      m.customReminders = (m.customReminders || []).filter(x => x.id !== id);
-      if (!saveData()) { m.customReminders = previousReminders; return; }
+      const cr = (m.customReminders || []).find(x => x.id === id);
+      const priorMeta = cr ? { deletedAt: cr.deletedAt, version: cr.version, updatedAt: cr.updatedAt } : null;
+      if (cr) tombstone(cr);
+      if (!saveData()) { m.customReminders = previousReminders; if (cr) Object.assign(cr, priorMeta); return; }
       renderMain();
     }
 
@@ -2468,6 +2526,7 @@
       const cr = (m.customReminders || []).find(x => x.id === id);
       if (!cr) return;
       const previousReminders = [...m.customReminders];
+      const priorMeta = { dueDate: cr.dueDate, deletedAt: cr.deletedAt, version: cr.version, updatedAt: cr.updatedAt };
 
       if (cr.repeatMonths > 0) {
         const next = new Date();
@@ -2475,10 +2534,10 @@
         cr.dueDate = next.toISOString().slice(0, 10);
         bumpVersion(cr);
       } else {
-        m.customReminders = m.customReminders.filter(x => x.id !== id);
+        tombstone(cr);
       }
 
-      if (!saveData()) { m.customReminders = previousReminders; return; }
+      if (!saveData()) { m.customReminders = previousReminders; Object.assign(cr, priorMeta); return; }
       renderMain();
     }
 
@@ -2546,7 +2605,7 @@
           document.getElementById('vTemp').value = record.vitals?.temp ?? '';
           document.getElementById('vGlucose').value = record.vitals?.glucose ?? '';
           document.getElementById('vWeight').value = record.vitals?.weight ?? '';
-          tempAttachments = (record.attachments || []).map(a => ({ ...a }));
+          tempAttachments = live(record.attachments || []).map(a => ({ ...a }));
           renderAttachmentPreview();
         } else {
           if (header) header.textContent = 'Add Health Record';
@@ -2631,6 +2690,9 @@
       if (!currentMemberId) return alert('Please select a member first');
       if (!(await ensureUnlocked())) return;
 
+      const mForAttachments = members.find(x => x.id === currentMemberId);
+      const priorRecordForAttachments = editingRecordId ? mForAttachments.records.find(r => r.id === editingRecordId) : null;
+      const persistedRecordAtt = await persistAttachmentsToIdb(tempAttachments);
       const record = {
         id: editingRecordId || ('r' + Date.now()),
         date: document.getElementById('rDate').value,
@@ -2639,7 +2701,7 @@
         details: document.getElementById('rDetails').value,
         tags: document.getElementById('rTags').value.split(',').map(t => t.trim()).filter(t => t),
         vitals: {},
-        attachments: await persistAttachmentsToIdb(tempAttachments)
+        attachments: syncStampAttachments(priorRecordForAttachments ? priorRecordForAttachments.attachments : [], persistedRecordAtt)
       };
 
       const vSystolic = document.getElementById('vSystolic').value;
@@ -2656,7 +2718,7 @@
       if (vWeight) record.vitals.weight = parseFloat(vWeight);
 
       if (Object.keys(record.vitals).length === 0) delete record.vitals;
-      if (record.attachments.length === 0) delete record.attachments;
+      if (record.attachments.length === 0) delete record.attachments; // fine: syncStampAttachments never returns an empty array if a tombstone exists
 
       const m = members.find(x => x.id === currentMemberId);
       const existingIdx = editingRecordId ? m.records.findIndex(r => r.id === editingRecordId) : -1;
@@ -2681,9 +2743,9 @@
 
       if (!saveData()) { m.records = previousRecords; return; }
 
-      // Clean up attachment files that were removed during this edit.
-      const newIds = new Set((record.attachments || []).map(a => a.id).filter(Boolean));
-      const removedIds = oldAttachmentIds.filter(id => !newIds.has(id));
+      // Clean up attachment files that were removed (now tombstoned) during this edit.
+      const newLiveIds = new Set(live(record.attachments || []).map(a => a.id).filter(Boolean));
+      const removedIds = oldAttachmentIds.filter(id => !newLiveIds.has(id));
       if (removedIds.length) idbDeleteMany(removedIds);
 
       closeModal('record');
@@ -2699,8 +2761,13 @@
       if (!confirm(`Delete this record ("${r.title}", ${r.date})? This cannot be undone.`)) return;
 
       const previousRecords = [...m.records];
-      m.records = m.records.filter(x => x.id !== recordId);
-      if (!saveData()) { m.records = previousRecords; return; }
+      const priorMeta = { deletedAt: r.deletedAt, version: r.version, updatedAt: r.updatedAt };
+      tombstone(r);
+      if (!saveData()) { m.records = previousRecords; Object.assign(r, priorMeta); return; }
+      // The tombstone (id + deletedAt) stays in the record forever so the
+      // deletion can propagate to other devices on next sync - but the
+      // actual attachment BYTES in IndexedDB are locally purged right away,
+      // since nothing needs them once this record is gone from view here.
       const idsToRemove = (r.attachments || []).map(a => a.id).filter(Boolean);
       if (idsToRemove.length) idbDeleteMany(idsToRemove);
       renderMain();
@@ -2713,8 +2780,9 @@
       if (!confirm(`Delete "${m.name}" and all their records? This cannot be undone.`)) return;
 
       const previousMembers = members;
-      members = members.filter(x => x.id !== memberId);
-      if (!saveData()) { members = previousMembers; return; }
+      const priorMeta = { deletedAt: m.deletedAt, version: m.version, updatedAt: m.updatedAt };
+      tombstone(m);
+      if (!saveData()) { members = previousMembers; Object.assign(m, priorMeta); return; }
       const idsToRemove = [];
       (m.records || []).forEach(r => (r.attachments || []).forEach(a => { if (a.id) idsToRemove.push(a.id); }));
       if (m.bloodTypeAttachment?.id) idsToRemove.push(m.bloodTypeAttachment.id);
@@ -4392,8 +4460,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         e.stopPropagation();
         if (!confirm('Delete this policy?')) return;
         const mm = members.find(x => x.id === currentMemberId);
-        mm.insurance.policies = mm.insurance.policies.filter(p => p.id !== el.dataset.insDeletePolicy);
-        mm.insurance.claims = mm.insurance.claims.filter(c => c.policyId !== el.dataset.insDeletePolicy);
+        const p = mm.insurance.policies.find(x => x.id === el.dataset.insDeletePolicy);
+        if (p) tombstone(p);
+        // Claims aren't nested under their policy in the data model (linked
+        // via policyId, not containment), so tombstone dominance can't be
+        // derived from an ancestor chain here - explicitly tombstone each
+        // affected claim too, mirroring the cascade the old physical-delete
+        // code did.
+        (mm.insurance.claims || []).filter(c => c.policyId === el.dataset.insDeletePolicy).forEach(tombstone);
         saveData(); renderMain();
       }));
       document.querySelectorAll('[data-ins-reactivate-policy]').forEach(el => el.addEventListener('click', (e) => {
@@ -4401,6 +4475,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         const mm = members.find(x => x.id === currentMemberId);
         const p = mm.insurance.policies.find(x => x.id === el.dataset.insReactivatePolicy);
         p.status = 'Active';
+        bumpVersion(p);
         saveData(); renderMain();
       }));
       document.querySelectorAll('[data-ins-open-ledger]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); insOpenLedgerModal(el.dataset.insOpenLedger); }));
@@ -4418,7 +4493,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         e.stopPropagation();
         if (!confirm('Delete this claim?')) return;
         const mm = members.find(x => x.id === currentMemberId);
-        mm.insurance.claims = mm.insurance.claims.filter(c => c.id !== el.dataset.insDeleteClaim);
+        const c = mm.insurance.claims.find(x => x.id === el.dataset.insDeleteClaim);
+        if (c) tombstone(c);
         saveData(); renderMain();
       }));
     }
@@ -4452,9 +4528,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('insPBonusPaidEnabled').checked = bonusPaidEnabled;
       document.getElementById('insBonusPaidFields').style.display = bonusPaidEnabled ? 'block' : 'none';
       document.getElementById('insPBonusPaidSince').value = bonusPaidEnabled ? (p.premiumPaidByBonusSince || '') : '';
-      insTempRiders = p && p.riders ? JSON.parse(JSON.stringify(p.riders)) : [];
-      insTempCoverages = p && p.coverages && p.coverages.length ? JSON.parse(JSON.stringify(p.coverages)) : [{ id: insUid(), type: 'Life', sumInsured: '', lifetimeLimit: '', annualLimit: '', reducing: false, expiry: '' }];
-      insTempAttachments = p && p.attachments ? p.attachments.map(a => ({ ...a })) : [];
+      insTempRiders = p && p.riders ? JSON.parse(JSON.stringify(live(p.riders))) : [];
+      insTempCoverages = p && p.coverages && live(p.coverages).length ? JSON.parse(JSON.stringify(live(p.coverages))) : [{ id: insUid(), type: 'Life', sumInsured: '', lifetimeLimit: '', annualLimit: '', reducing: false, expiry: '' }];
+      insTempAttachments = p && p.attachments ? live(p.attachments).map(a => ({ ...a })) : [];
       insRenderRidersRows();
       insRenderCoverageRows();
       insRenderAttachmentPreview();
@@ -4630,13 +4706,18 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const newRiders = insTempRiders.filter(r => r.description || r.dueDate);
       // Coverages/riders are edited via a temp array and the whole array is
       // rebuilt on every save (not saved field-by-field like member scalars),
-      // so version/deletedAt carry-forward + diff-before-bump has to happen
-      // here rather than at individual field-edit time. See syncStampSubEntities.
-      syncStampSubEntities(existingPolicy ? existingPolicy.coverages : [], cleanCoverages);
-      syncStampSubEntities(existingPolicy ? existingPolicy.riders : [], newRiders);
+      // so version/deletedAt carry-forward + diff-before-bump (and turning a
+      // removed-from-the-form item into a tombstone instead of letting it
+      // vanish) has to happen here rather than at individual field-edit time.
+      // See syncStampSubEntities - note it returns a NEW array (it may be
+      // longer than what was passed in, since removed-but-not-yet-tombstoned
+      // items get added back as tombstones), so the results replace
+      // cleanCoverages/newRiders rather than being used in place.
+      const finalCoverages = syncStampSubEntities(existingPolicy ? existingPolicy.coverages : [], cleanCoverages);
+      const finalRiders = syncStampSubEntities(existingPolicy ? existingPolicy.riders : [], newRiders);
       const payoutEnabled = document.getElementById('insPPayoutEnabled').checked;
       const bonusPaidEnabled = document.getElementById('insPBonusPaidEnabled').checked;
-      const savedAttachments = await persistAttachmentsToIdb(insTempAttachments);
+      const savedAttachments = syncStampAttachments(existingPolicy ? existingPolicy.attachments : [], await persistAttachmentsToIdb(insTempAttachments));
       const data = {
         status: document.getElementById('insPStatus').value,
         provider: document.getElementById('insPProvider').value.trim(),
@@ -4646,8 +4727,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         start: document.getElementById('insPStart').value,
         expiry: document.getElementById('insPExpiry').value,
         notes: document.getElementById('insPNotes').value.trim(),
-        coverages: cleanCoverages,
-        riders: newRiders,
+        coverages: finalCoverages,
+        riders: finalRiders,
         attachments: savedAttachments,
         payout: payoutEnabled ? {
           startYear: document.getElementById('insPPayoutStartYear').value,
@@ -4747,7 +4828,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         document.getElementById('insLNotes').value = l.notes || '';
         document.getElementById('insBtnAddLedgerEntry').textContent = 'Update Transaction';
         document.getElementById('insBtnCancelLedgerEdit').style.display = 'inline-block';
-        insTempLedgerAttachments = l.attachments ? l.attachments.map(a => ({ ...a })) : [];
+        insTempLedgerAttachments = l.attachments ? live(l.attachments).map(a => ({ ...a })) : [];
         insRenderLedgerAttachmentPreview();
         // The edit form lives above the ledger list, so without this the user has to
         // manually scroll up to find it -- especially painful with a long transaction list.
@@ -4757,7 +4838,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         if (!confirm('Delete this transaction? This cannot be undone.')) return;
         const m = members.find(x => x.id === currentMemberId);
         const p = m.insurance.policies.find(x => x.id === insCurrentLedgerPolicyId);
-        p.ledger = p.ledger.filter(x => x.id !== el.dataset.insRemoveLedger);
+        const l = p.ledger.find(x => x.id === el.dataset.insRemoveLedger);
+        if (l) tombstone(l);
         saveData();
         if (insEditingLedgerId === el.dataset.insRemoveLedger) insResetLedgerForm();
         insRenderLedgerList(p); renderMain();
@@ -4771,12 +4853,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === currentMemberId);
       const p = m.insurance.policies.find(x => x.id === insCurrentLedgerPolicyId);
       if (!p.ledger) p.ledger = [];
+      const priorLedgerEntry = insEditingLedgerId ? p.ledger.find(x => x.id === insEditingLedgerId) : null;
+      const persistedLedgerAtt = await persistAttachmentsToIdb(insTempLedgerAttachments);
       const data = {
         date, amount,
         type: document.getElementById('insLType').value,
         method: document.getElementById('insLMethod').value,
         notes: document.getElementById('insLNotes').value.trim(),
-        attachments: await persistAttachmentsToIdb(insTempLedgerAttachments)
+        attachments: syncStampAttachments(priorLedgerEntry ? priorLedgerEntry.attachments : [], persistedLedgerAtt)
       };
       let savedLedgerId;
       if (insEditingLedgerId) {
@@ -4916,7 +5000,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         document.getElementById('insSNonGuaranteed').value = r.nonGuaranteedValue ?? '';
         document.getElementById('insBtnAddSurrenderEntry').textContent = 'Update Statement Record';
         document.getElementById('insBtnCancelSurrenderEdit').style.display = 'inline-block';
-        insTempSurrenderAttachments = r.attachments ? r.attachments.map(a => ({ ...a })) : [];
+        insTempSurrenderAttachments = r.attachments ? live(r.attachments).map(a => ({ ...a })) : [];
         insRenderSurrenderAttachmentPreview();
         document.getElementById('insSurrenderFormTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
       }));
@@ -4924,7 +5008,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         if (!confirm('Delete this statement record? This cannot be undone.')) return;
         const m = members.find(x => x.id === currentMemberId);
         const p = m.insurance.policies.find(x => x.id === insCurrentSurrenderPolicyId);
-        p.surrenderRecords = p.surrenderRecords.filter(x => x.id !== el.dataset.insRemoveSurrender);
+        const s = p.surrenderRecords.find(x => x.id === el.dataset.insRemoveSurrender);
+        if (s) tombstone(s);
         saveData();
         if (insEditingSurrenderId === el.dataset.insRemoveSurrender) insResetSurrenderForm();
         insRenderSurrenderList(p); renderMain();
@@ -4937,13 +5022,15 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === currentMemberId);
       const p = m.insurance.policies.find(x => x.id === insCurrentSurrenderPolicyId);
       if (!p.surrenderRecords) p.surrenderRecords = [];
+      const priorSurrenderEntry = insEditingSurrenderId ? p.surrenderRecords.find(x => x.id === insEditingSurrenderId) : null;
+      const persistedSurrenderAtt = await persistAttachmentsToIdb(insTempSurrenderAttachments);
       const data = {
         date,
         accumulatedBonus: document.getElementById('insSBonus').value,
         dividend: document.getElementById('insSDividend').value,
         guaranteedCashValue: document.getElementById('insSGuaranteed').value,
         nonGuaranteedValue: document.getElementById('insSNonGuaranteed').value,
-        attachments: await persistAttachmentsToIdb(insTempSurrenderAttachments)
+        attachments: syncStampAttachments(priorSurrenderEntry ? priorSurrenderEntry.attachments : [], persistedSurrenderAtt)
       };
       if (insEditingSurrenderId) {
         const r = p.surrenderRecords.find(x => x.id === insEditingSurrenderId);
@@ -5059,7 +5146,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         const m = members.find(x => x.id === currentMemberId);
         const p = m.insurance.policies.find(x => x.id === insCurrentSumHistoryPolicyId);
         const c = (p.coverages||[]).find(x => x.id === insCurrentSumHistoryCoverageId);
-        c.sumInsuredHistory = c.sumInsuredHistory.filter(x => x.id !== el.dataset.insRemoveSumhistory);
+        const h = c.sumInsuredHistory.find(x => x.id === el.dataset.insRemoveSumhistory);
+        if (h) tombstone(h);
         saveData();
         if (insEditingSumHistoryId === el.dataset.insRemoveSumhistory) insResetSumHistoryForm();
         insRenderSumHistoryList(c); renderMain();
