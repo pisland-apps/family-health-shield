@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v31';
-    const APP_VERSION_DATE = '2026-09-07';
+    const APP_VERSION = 'v32';
+    const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -177,6 +177,215 @@
         Object.keys(value).forEach(k => sanitizeIdsDeep(value[k]));
       }
       return value;
+    }
+
+    // Deep-clones a value (structuredClone where available, JSON round-trip
+    // fallback) and THEN runs sanitizeIdsDeep on the clone. Deliberately
+    // separate from sanitizeIdsDeep itself: that function mutates its input
+    // in place and returns the same reference, which is fine for its one
+    // existing caller (a disposable just-parsed import blob) but wrong for
+    // "keep both" merge-conflict resolutions, which need an INDEPENDENT
+    // copy with new ids - reusing sanitizeIdsDeep directly there would
+    // remap the ORIGINAL entity's ids instead of producing a duplicate.
+    function deepCloneAndRemapIds(value) {
+      const clone = (typeof structuredClone === 'function')
+        ? structuredClone(value)
+        : JSON.parse(JSON.stringify(value));
+      return sanitizeIdsDeep(clone);
+    }
+
+    // ========== SYNC METADATA (field/array-level merge support) ==========
+    // See MERGE_SYNC_DESIGN.md for the full semantics. Summary: `version` is
+    // a Lamport logical clock (bumped on every local edit, set to
+    // max(local,remote)+1 on merge) - NOT a wall-clock timestamp, and never
+    // compared across devices' clocks. `updatedAt` is wall-clock but is
+    // display-only and must never be read by any merge/conflict logic.
+    // `deletedAt` is a tombstone marker (soft delete). `schemaVersion` is
+    // for future field-shape migrations of this one entity.
+    const SYNC_SCHEMA_VERSION = 1;
+
+    function nowIso() {
+      return new Date().toISOString();
+    }
+
+    // Attach fresh sync metadata to a brand-new entity (member, record,
+    // reminder, policy, ledger row, coverage, rider, sumInsuredHistory
+    // entry, claim, surrender record, ...). Call this once at creation time;
+    // call bumpVersion() on every subsequent edit.
+    function freshSyncMeta() {
+      return { version: 1, updatedAt: nowIso(), deletedAt: null, schemaVersion: SYNC_SCHEMA_VERSION };
+    }
+
+    // Call on every local edit to an entity that already has sync metadata
+    // (i.e. after migration, everything). Mutates in place.
+    function bumpVersion(entity) {
+      if (!entity || typeof entity !== 'object') return entity;
+      entity.version = (Number.isFinite(entity.version) ? entity.version : 1) + 1;
+      entity.updatedAt = nowIso();
+      return entity;
+    }
+
+    // Persistent per-device identity, used only for conflict-queue
+    // provenance/debugging (see design doc 1.3) - NEVER as a tie-breaker in
+    // merge logic. Stored outside STORAGE_KEY/members on purpose, so it is
+    // untouched by export/import and survives independently per browser.
+    const DEVICE_ID_KEY = 'family_health_tracker_device_id';
+    let _deviceId = null;
+    function getDeviceId() {
+      if (_deviceId) return _deviceId;
+      try {
+        let id = localStorage.getItem(DEVICE_ID_KEY);
+        if (!id) {
+          id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : freshId('dev');
+          localStorage.setItem(DEVICE_ID_KEY, id);
+        }
+        _deviceId = id;
+      } catch (e) {
+        // localStorage unavailable (private mode edge cases etc.) - fall
+        // back to an in-memory id for this session only. Provenance-only
+        // field, so a non-persistent fallback here is not a correctness risk.
+        _deviceId = freshId('dev');
+      }
+      return _deviceId;
+    }
+
+    // Scalar member fields tracked individually via member.fieldVersion, so
+    // two people editing different fields on the same member (e.g. A changes
+    // phone, B changes allergies) never conflict with or clobber each other.
+    // NOTE: keep this list in sync with the fields actually collected in
+    // saveMember()'s `fields` object - any field added there without being
+    // added here silently falls back to whole-member conflict granularity.
+    const MEMBER_SCALAR_FIELDS = [
+      'name', 'nameZh', 'nameZhAvatarIdx', 'gender', 'birth', 'blood',
+      'height', 'allergies', 'emergency', 'bloodTypeAttachment'
+    ];
+    // history is handled separately (id+version entry array, see design 1.10 / 2.1), not a plain scalar.
+
+    function freshFieldVersions() {
+      const fv = {};
+      MEMBER_SCALAR_FIELDS.forEach(f => { fv[f] = 1; });
+      return fv;
+    }
+
+    // Bumps the fieldVersion entry for exactly the scalar fields that
+    // actually changed between `before` and `after` (shallow compare via
+    // JSON.stringify - fine for these field types: strings/numbers/null and
+    // the small bloodTypeAttachment object). Also bumps entity.version once
+    // if anything changed, matching bumpVersion()'s semantics.
+    function bumpFieldVersions(member, before, after) {
+      if (!member.fieldVersion) member.fieldVersion = freshFieldVersions();
+      let changed = false;
+      MEMBER_SCALAR_FIELDS.forEach(f => {
+        if (JSON.stringify(before[f]) !== JSON.stringify(after[f])) {
+          member.fieldVersion[f] = (member.fieldVersion[f] || 1) + 1;
+          changed = true;
+        }
+      });
+      if (changed) bumpVersion(member);
+      return changed;
+    }
+
+    // Converts a plain history/notes string into the id+version entry-array
+    // shape (design 1.10). v1 UI still edits this as a single block, so in
+    // practice this array holds one entry that gets its version bumped on
+    // edit - but the shape is future-proof for a later "append a new entry"
+    // affordance without a text-migration headache.
+    function historyTextToEntries(text) {
+      const t = (text || '').trim();
+      if (!t) return [];
+      return [{ id: freshId('hx'), version: 1, text: t, deletedAt: null }];
+    }
+    // Reads the current effective history text back out of the entry array
+    // (v1: just the latest non-deleted entry's text) for anywhere the app
+    // still wants a plain string (rendering, reminders' `.includes(...)` check).
+    function historyEntriesToText(entries) {
+      if (!Array.isArray(entries)) return '';
+      const live = entries.filter(e => !e.deletedAt);
+      return live.length ? live[live.length - 1].text : '';
+    }
+
+    // Recursively backfills sync metadata onto every syncable entity in the
+    // existing (pre-merge-sync-feature) member data: called once at load
+    // time for both real user data and DEMO_DATA. Idempotent - entities that
+    // already have a `version` field are left untouched, so re-running this
+    // on already-migrated data (e.g. after a fresh import of an old-format
+    // single-member file) is always safe.
+    function migrateSyncFields(allMembers) {
+      if (!Array.isArray(allMembers)) return allMembers;
+
+      // Generic recursive stamp for any array of id-bearing entities nested
+      // under insurance (ledger rows, riders, coverages, sumInsuredHistory,
+      // surrender records, claims, ...). Attachments get the reduced
+      // id+deletedAt-only shape per design 1.9/2.2, not a full version stamp.
+      function stampArray(arr, { attachmentsOnly = false } = {}) {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(item => {
+          if (!item || typeof item !== 'object') return;
+          if (attachmentsOnly) {
+            if (!('deletedAt' in item)) item.deletedAt = null;
+            return;
+          }
+          if (!Number.isFinite(item.version)) item.version = 1;
+          if (!('updatedAt' in item) || !item.updatedAt) item.updatedAt = nowIso();
+          if (!('deletedAt' in item)) item.deletedAt = null;
+          if (!Number.isFinite(item.schemaVersion)) item.schemaVersion = SYNC_SCHEMA_VERSION;
+        });
+      }
+
+      function stampPolicy(p) {
+        if (!p || typeof p !== 'object') return;
+        if (!Number.isFinite(p.version)) p.version = 1;
+        if (!('updatedAt' in p) || !p.updatedAt) p.updatedAt = nowIso();
+        if (!('deletedAt' in p)) p.deletedAt = null;
+        if (!Number.isFinite(p.schemaVersion)) p.schemaVersion = SYNC_SCHEMA_VERSION;
+        stampArray(p.ledger);
+        stampArray(p.riders);
+        stampArray(p.coverages);
+        (p.coverages || []).forEach(c => stampArray(c.sumInsuredHistory));
+        stampArray(p.surrenderRecords);
+        stampArray(p.claims);
+        stampArray(p.attachments, { attachmentsOnly: true });
+        (p.ledger || []).forEach(l => stampArray(l.attachments, { attachmentsOnly: true }));
+      }
+
+      allMembers.forEach(m => {
+        if (!m || typeof m !== 'object') return;
+
+        if (!Number.isFinite(m.version)) m.version = 1;
+        if (!('updatedAt' in m) || !m.updatedAt) m.updatedAt = nowIso();
+        if (!('deletedAt' in m)) m.deletedAt = null;
+        if (!Number.isFinite(m.schemaVersion)) m.schemaVersion = SYNC_SCHEMA_VERSION;
+        if (!m.fieldVersion) m.fieldVersion = freshFieldVersions();
+
+        // history: add the id+version entry-array shadow alongside the
+        // existing m.history string, WITHOUT touching m.history itself yet.
+        // Every current render/read site in the app (BP reminder check,
+        // print views, the edit form, etc.) still reads m.history as a
+        // plain string - rewiring all of those to read through
+        // historyEntriesToText()/write through historyTextToEntries() is
+        // deliberately left for the merge-wiring step (build order step 4),
+        // not bundled into this data-layer pass. Until that wiring lands,
+        // historyEntries exists but is not yet the source of truth -
+        // m.history remains authoritative.
+        if (!Array.isArray(m.historyEntries)) {
+          m.historyEntries = historyTextToEntries(m.history);
+        }
+
+        stampArray(m.records);
+        (m.records || []).forEach(r => stampArray(r.attachments, { attachmentsOnly: true }));
+        stampArray(m.customReminders);
+        if (m.bloodTypeAttachment && typeof m.bloodTypeAttachment === 'object' && !('deletedAt' in m.bloodTypeAttachment)) {
+          m.bloodTypeAttachment.deletedAt = null;
+        }
+
+        if (m.insurance && Array.isArray(m.insurance.policies)) {
+          m.insurance.policies.forEach(stampPolicy);
+        }
+      });
+
+      return allMembers;
     }
 
     // Returns a NEW array of records sorted by date descending (newest first).
@@ -1168,6 +1377,7 @@
           const jsonStr = await decryptText(saved, cryptoKey);
           const parsed = JSON.parse(jsonStr);
           members = (Array.isArray(parsed) && parsed.length > 0) ? parsed : [];
+          migrateSyncFields(members);
         } catch (e) {
           alert('⚠️ Your data could not be decrypted even though the passcode was accepted. ' +
                 'To avoid data loss, the app will not load or overwrite anything. ' +
@@ -1181,17 +1391,21 @@
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed) && parsed.length > 0) {
             members = parsed;
+            migrateSyncFields(members);
           } else {
             members = JSON.parse(JSON.stringify(DEMO_DATA));
+            migrateSyncFields(members);
             saveData();
           }
         } catch(e) {
           members = JSON.parse(JSON.stringify(DEMO_DATA));
+          migrateSyncFields(members);
           saveData();
         }
       } else {
         // First time - load demo data
         members = JSON.parse(JSON.stringify(DEMO_DATA));
+        migrateSyncFields(members);
         saveData();
       }
 
@@ -2191,8 +2405,17 @@
       if (!m.customReminders) m.customReminders = [];
       const previousReminders = [...m.customReminders];
       const idx = m.customReminders.findIndex(x => x.id === reminder.id);
-      if (idx > -1) m.customReminders[idx] = reminder;
-      else m.customReminders.push(reminder);
+      if (idx > -1) {
+        const prior = m.customReminders[idx];
+        reminder.version = prior.version;
+        reminder.deletedAt = prior.deletedAt;
+        reminder.schemaVersion = prior.schemaVersion || SYNC_SCHEMA_VERSION;
+        bumpVersion(reminder);
+        m.customReminders[idx] = reminder;
+      } else {
+        Object.assign(reminder, freshSyncMeta());
+        m.customReminders.push(reminder);
+      }
 
       if (!saveData()) { m.customReminders = previousReminders; return; }
       closeReminderModal();
@@ -2221,6 +2444,7 @@
         const next = new Date();
         next.setMonth(next.getMonth() + cr.repeatMonths);
         cr.dueDate = next.toISOString().slice(0, 10);
+        bumpVersion(cr);
       } else {
         m.customReminders = m.customReminders.filter(x => x.id !== id);
       }
@@ -2356,14 +2580,16 @@
         const m = members.find(x => x.id === editingMemberId);
         if (!m) return;
         const oldAttId = m.bloodTypeAttachment?.id;
+        const before = {}; MEMBER_SCALAR_FIELDS.forEach(f => { before[f] = m[f]; });
         Object.assign(m, fields);
+        bumpFieldVersions(m, before, fields); // per-field version bump, see design 2.1
         if (!saveData()) return; // keep modal open so nothing is lost if storage failed
         if (oldAttId && oldAttId !== fields.bloodTypeAttachment?.id) idbDelete(oldAttId);
         renderMemberList();
         closeModal('member');
         renderMain();
       } else {
-        const member = { id: Date.now().toString(), ...fields, records: [] };
+        const member = { id: Date.now().toString(), ...fields, records: [], ...freshSyncMeta(), fieldVersion: freshFieldVersions(), historyEntries: historyTextToEntries(fields.history) };
         members.push(member);
         if (!saveData()) { members.pop(); return; }
         renderMemberList();
@@ -2411,8 +2637,16 @@
       const oldAttachmentIds = existingIdx > -1 ? (m.records[existingIdx].attachments || []).map(a => a.id).filter(Boolean) : [];
 
       if (existingIdx > -1) {
+        // Preserve sync metadata identity across an edit: bump version,
+        // don't reset it to 1, and don't touch deletedAt/schemaVersion.
+        const prior = m.records[existingIdx];
+        record.version = prior.version;
+        record.deletedAt = prior.deletedAt;
+        record.schemaVersion = prior.schemaVersion || SYNC_SCHEMA_VERSION;
+        bumpVersion(record);
         m.records[existingIdx] = record;
       } else {
+        Object.assign(record, freshSyncMeta());
         m.records.push(record);
       }
 
