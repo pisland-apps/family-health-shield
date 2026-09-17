@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v33';
+    const APP_VERSION = 'v34';
     const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -3433,6 +3433,12 @@
                 l.attachments[i].data = await resolveAttachmentData(origLedger.attachments[i]);
               }
             }
+            for (const s of (p.surrenderRecords || [])) {
+              const origSurrender = (origPolicy.surrenderRecords || []).find(x => x.id === s.id);
+              for (let i = 0; i < (s.attachments || []).length; i++) {
+                s.attachments[i].data = await resolveAttachmentData(origSurrender.attachments[i]);
+              }
+            }
           }
         }
         out.push(copy);
@@ -3648,6 +3654,11 @@
             for (const l of (p.ledger || [])) {
               if (l.attachments && l.attachments.length) {
                 l.attachments = await persistAttachmentsToIdb(l.attachments);
+              }
+            }
+            for (const s of (p.surrenderRecords || [])) {
+              if (s.attachments && s.attachments.length) {
+                s.attachments = await persistAttachmentsToIdb(s.attachments);
               }
             }
           }
@@ -3872,6 +3883,11 @@
           }
           for (const l of (p.ledger || [])) {
             for (const att of (l.attachments || [])) {
+              if (await writeAttachmentIntoZip(att)) embeddedCount++; else missingCount++;
+            }
+          }
+          for (const s of (p.surrenderRecords || [])) {
+            for (const att of (s.attachments || [])) {
               if (await writeAttachmentIntoZip(att)) embeddedCount++; else missingCount++;
             }
           }
