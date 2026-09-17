@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v32';
+    const APP_VERSION = 'v33';
     const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -306,7 +306,36 @@
       return live.length ? live[live.length - 1].text : '';
     }
 
-    // Recursively backfills sync metadata onto every syncable entity in the
+    // For sub-entities that get rebuilt as a whole array on each save (policy
+    // coverages/riders, edited via a temp array and committed together) -
+    // matches newArr items to priorArr by id, carries forward
+    // version/deletedAt/schemaVersion, and bumps version only if the
+    // non-metadata content actually changed (mirrors bumpFieldVersions'
+    // diff-before-bump discipline, so re-saving a policy with no real
+    // changes to a given coverage/rider doesn't manufacture a fake
+    // conflict later). Items with no matching prior id are new -> freshSyncMeta().
+    function syncStampSubEntities(priorArr, newArr) {
+      const priorById = new Map((priorArr || []).map(x => [x.id, x]));
+      const stripMeta = obj => {
+        const c = { ...obj };
+        delete c.version; delete c.deletedAt; delete c.schemaVersion; delete c.updatedAt;
+        return c;
+      };
+      (newArr || []).forEach(item => {
+        const prior = priorById.get(item.id);
+        if (prior) {
+          item.version = prior.version;
+          item.deletedAt = prior.deletedAt;
+          item.schemaVersion = prior.schemaVersion || SYNC_SCHEMA_VERSION;
+          item.updatedAt = prior.updatedAt || nowIso();
+          if (JSON.stringify(stripMeta(prior)) !== JSON.stringify(stripMeta(item))) bumpVersion(item);
+        } else {
+          Object.assign(item, freshSyncMeta());
+        }
+      });
+      return newArr;
+    }
+
     // existing (pre-merge-sync-feature) member data: called once at load
     // time for both real user data and DEMO_DATA. Idempotent - entities that
     // already have a `version` field are left untouched, so re-running this
@@ -1117,7 +1146,7 @@
           await idbPut(id, att.data);
           let thumb = att.thumb;
           if (!thumb && att.type === 'image') thumb = await makeThumbFromDataUrl(att.data);
-          out.push({ id, name: att.name, path: att.path, type: att.type, thumb, size: att.size || att.data.length });
+          out.push({ id, name: att.name, path: att.path, type: att.type, thumb, size: att.size || att.data.length, deletedAt: null });
         } else {
           out.push(att);
         }
@@ -4581,6 +4610,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           sumInsuredHistory: c.sumInsuredHistory || []
         }));
       if (!cleanCoverages.length) { alert('Add at least one coverage with a sum insured (or limits for medical cover)'); return; }
+      const existingPolicy = insEditingPolicyId ? m.insurance.policies.find(x => x.id === insEditingPolicyId) : null;
+      const newRiders = insTempRiders.filter(r => r.description || r.dueDate);
+      // Coverages/riders are edited via a temp array and the whole array is
+      // rebuilt on every save (not saved field-by-field like member scalars),
+      // so version/deletedAt carry-forward + diff-before-bump has to happen
+      // here rather than at individual field-edit time. See syncStampSubEntities.
+      syncStampSubEntities(existingPolicy ? existingPolicy.coverages : [], cleanCoverages);
+      syncStampSubEntities(existingPolicy ? existingPolicy.riders : [], newRiders);
       const payoutEnabled = document.getElementById('insPPayoutEnabled').checked;
       const bonusPaidEnabled = document.getElementById('insPBonusPaidEnabled').checked;
       const savedAttachments = await persistAttachmentsToIdb(insTempAttachments);
@@ -4594,7 +4631,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         expiry: document.getElementById('insPExpiry').value,
         notes: document.getElementById('insPNotes').value.trim(),
         coverages: cleanCoverages,
-        riders: insTempRiders.filter(r => r.description || r.dueDate),
+        riders: newRiders,
         attachments: savedAttachments,
         payout: payoutEnabled ? {
           startYear: document.getElementById('insPPayoutStartYear').value,
@@ -4604,11 +4641,11 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         premiumPaidByBonus: bonusPaidEnabled,
         premiumPaidByBonusSince: bonusPaidEnabled ? document.getElementById('insPBonusPaidSince').value : ''
       };
-      if (insEditingPolicyId) {
-        const p = m.insurance.policies.find(x => x.id === insEditingPolicyId);
-        Object.assign(p, data);
+      if (existingPolicy) {
+        Object.assign(existingPolicy, data);
+        bumpVersion(existingPolicy);
       } else {
-        m.insurance.policies.push(Object.assign({ id: insUid(), ledger: [], surrenderRecords: [] }, data));
+        m.insurance.policies.push(Object.assign({ id: insUid(), ledger: [], surrenderRecords: [] }, data, freshSyncMeta()));
       }
       saveData();
       document.getElementById('insPolicyModal').classList.remove('active');
@@ -4729,9 +4766,10 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (insEditingLedgerId) {
         const l = p.ledger.find(x => x.id === insEditingLedgerId);
         Object.assign(l, data);
+        bumpVersion(l);
         savedLedgerId = l.id;
       } else {
-        const newEntry = Object.assign({ id: insUid() }, data);
+        const newEntry = Object.assign({ id: insUid() }, data, freshSyncMeta());
         p.ledger.push(newEntry);
         savedLedgerId = newEntry.id;
       }
@@ -4894,8 +4932,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (insEditingSurrenderId) {
         const r = p.surrenderRecords.find(x => x.id === insEditingSurrenderId);
         Object.assign(r, data);
+        bumpVersion(r);
       } else {
-        p.surrenderRecords.push(Object.assign({ id: insUid() }, data));
+        p.surrenderRecords.push(Object.assign({ id: insUid() }, data, freshSyncMeta()));
       }
       saveData();
       insResetSurrenderForm();
@@ -5021,8 +5060,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (insEditingSumHistoryId) {
         const h = c.sumInsuredHistory.find(x => x.id === insEditingSumHistoryId);
         Object.assign(h, { date, amount });
+        bumpVersion(h);
       } else {
-        c.sumInsuredHistory.push({ id: insUid(), date, amount });
+        c.sumInsuredHistory.push(Object.assign({ id: insUid(), date, amount }, freshSyncMeta()));
       }
       saveData();
       insResetSumHistoryForm();
@@ -5079,8 +5119,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (insEditingClaimId) {
         const c = m.insurance.claims.find(x => x.id === insEditingClaimId);
         Object.assign(c, data);
+        bumpVersion(c);
       } else {
-        m.insurance.claims.push(Object.assign({ id: insUid() }, data));
+        m.insurance.claims.push(Object.assign({ id: insUid() }, data, freshSyncMeta()));
       }
       saveData();
       document.getElementById('insClaimModal').classList.remove('active');
