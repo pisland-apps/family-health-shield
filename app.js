@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v36';
+    const APP_VERSION = 'v37';
     const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -4175,7 +4175,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       return m.insurance.claims.filter(c => c.policyId === policyId && c.coverageId === coverageId).reduce((s,c) => s + (Number(c.amountPaid)||0), 0);
     }
     function insLatestSurrenderTotal(p) {
-      const recs = p.surrenderRecords || [];
+      const recs = live(p.surrenderRecords || []);
       if (!recs.length) return null;
       const latest = [...recs].sort((a,b) => new Date(b.date) - new Date(a.date))[0];
       return insSurrenderRecordTotal(latest);
