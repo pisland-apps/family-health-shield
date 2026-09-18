@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v35';
+    const APP_VERSION = 'v36';
     const APP_VERSION_DATE = '2026-09-17';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -429,9 +429,9 @@
         stampArray(p.coverages);
         (p.coverages || []).forEach(c => stampArray(c.sumInsuredHistory));
         stampArray(p.surrenderRecords);
-        stampArray(p.claims);
         stampArray(p.attachments, { attachmentsOnly: true });
         (p.ledger || []).forEach(l => stampArray(l.attachments, { attachmentsOnly: true }));
+        (p.surrenderRecords || []).forEach(s => stampArray(s.attachments, { attachmentsOnly: true }));
       }
 
       allMembers.forEach(m => {
@@ -467,6 +467,9 @@
         if (m.insurance && Array.isArray(m.insurance.policies)) {
           m.insurance.policies.forEach(stampPolicy);
         }
+        if (m.insurance && Array.isArray(m.insurance.claims)) {
+          stampArray(m.insurance.claims);
+        }
       });
 
       return allMembers;
@@ -476,7 +479,7 @@
     // Never mutates m.records, so "latest" values stay consistent no matter
     // which tabs the user has viewed.
     function recordsByDateDesc(m) {
-      return [...(m.records || [])].sort((a, b) => new Date(b.date) - new Date(a.date));
+      return live(m.records).sort((a, b) => new Date(b.date) - new Date(a.date));
     }
 
     // Finds the most recent record (by date) that has vitals, and returns its vitals.
@@ -1719,7 +1722,7 @@
       const latestVitals = getLatestVitals(m);
       const bmi = calcBmi(m.height, latestVitals.weight);
 
-      const bpRecords = m.records.filter(r => r.vitals?.systolic).sort((a,b) => new Date(a.date) - new Date(b.date));
+      const bpRecords = live(m.records).filter(r => r.vitals?.systolic).sort((a,b) => new Date(a.date) - new Date(b.date));
       const chartHtml = bpRecords.length > 1 ? renderBPChart(bpRecords) : '<p class="s-b9373de3">Record more BP data to see trends</p>';
 
       const reminders = generateReminders(m);
@@ -1841,7 +1844,7 @@
         item.addEventListener('click', () => {
           const memberObj = members.find(x => x.id === currentMemberId);
           const record = memberObj?.records.find(x => x.id === item.dataset.recordId);
-          const att = record?.attachments?.[parseInt(item.dataset.attIdx)];
+          const att = record ? live(record.attachments || [])[parseInt(item.dataset.attIdx)] : null;
           openAttachment(att);
         });
       });
@@ -1923,14 +1926,15 @@
     function renderRecords(m) {
       return `
         <div class="card">
-          <div class="card-title">📋 Health Records (${m.records.length})</div>
+          <div class="card-title">📋 Health Records (${live(m.records).length})</div>
           <div class="timeline">
             ${recordsByDateDesc(m).map(r => {
               const color = r.type === 'Hospitalization' ? 'purple' : r.type === 'Illness' ? 'red' : r.type === 'Vaccine' ? 'green' : r.type === 'Medication' ? 'yellow' : 'primary';
               const icon = { 'Checkup':'🏥','Vaccine':'💉','Illness':'🤒','Hospitalization':'🚑','Medication':'💊','Lab Test':'🔬','Monitoring':'📊' }[r.type] || '📋';
-              const attachmentsHtml = r.attachments?.length ? `
+              const liveAtts = live(r.attachments || []);
+              const attachmentsHtml = liveAtts.length ? `
                 <div class="attachment-list s-d79ce2bc">
-                  ${r.attachments.map((att, idx) => renderAttachmentItem(att, r.id, idx)).join('')}
+                  ${liveAtts.map((att, idx) => renderAttachmentItem(att, r.id, idx)).join('')}
                 </div>
               ` : '';
               return `
@@ -2343,7 +2347,7 @@
     }
 
     function renderWeightChart(m) {
-      const weightRecords = m.records.filter(r => r.vitals?.weight).sort((a,b) => new Date(a.date) - new Date(b.date));
+      const weightRecords = live(m.records).filter(r => r.vitals?.weight).sort((a,b) => new Date(a.date) - new Date(b.date));
       if (weightRecords.length < 2) return '<p class="s-b9373de3">Record more weight data to see trends</p>';
 
       const w = 600, h = 200, pad = 40;
@@ -2377,7 +2381,7 @@
       const reminders = [];
       const today = new Date();
 
-      const lastExam = m.records.filter(r => r.type === 'Checkup').sort((a,b) => new Date(b.date) - new Date(a.date))[0];
+      const lastExam = live(m.records).filter(r => r.type === 'Checkup').sort((a,b) => new Date(b.date) - new Date(a.date))[0];
       if (lastExam) {
         const examDate = new Date(lastExam.date);
         const nextExam = new Date(examDate); nextExam.setFullYear(nextExam.getFullYear() + 1);
@@ -2391,7 +2395,7 @@
         });
       }
 
-      const lastFlu = m.records.filter(r => r.type === 'Vaccine' && r.title.includes('Flu')).sort((a,b) => new Date(b.date) - new Date(a.date))[0];
+      const lastFlu = live(m.records).filter(r => r.type === 'Vaccine' && r.title.includes('Flu')).sort((a,b) => new Date(b.date) - new Date(a.date))[0];
       if (lastFlu) {
         const fluDate = new Date(lastFlu.date);
         const nextFlu = new Date(fluDate); nextFlu.setFullYear(nextFlu.getFullYear() + 1);
@@ -2406,7 +2410,7 @@
       }
 
       if (m.history.includes('Hypertension')) {
-        const lastBP = m.records.filter(r => r.vitals?.systolic).sort((a,b) => new Date(b.date) - new Date(a.date))[0];
+        const lastBP = live(m.records).filter(r => r.vitals?.systolic).sort((a,b) => new Date(b.date) - new Date(a.date))[0];
         if (lastBP) {
           const bpDate = new Date(lastBP.date);
           const daysSince = Math.floor((today - bpDate) / 86400000);
@@ -2420,7 +2424,7 @@
         }
       }
 
-      (m.customReminders || []).forEach(cr => {
+      live(m.customReminders || []).forEach(cr => {
         const dueDate = new Date(cr.dueDate);
         const daysDiff = Math.floor((dueDate - today) / 86400000);
         reminders.push({
@@ -2800,13 +2804,13 @@
     // modal can list only the attachments that are actually relevant to
     // that specific report.
     const reportMeta = {
-      summary:    { label: 'Health Summary', printFn: printHealthSummary,   recordsFor: m => m.records },
-      vaccine:    { label: 'Vaccine Record', printFn: printVaccineCard,     recordsFor: m => m.records.filter(r => r.type === 'Vaccine') },
-      medication: { label: 'Medication List', printFn: printMedicationList, recordsFor: m => m.records.filter(r => r.type === 'Medication') },
-      lab:        { label: 'Lab Results', printFn: printLabSummary,         recordsFor: m => m.records.filter(r => r.type === 'Lab Test' || r.type === 'Checkup') },
-      bp:         { label: 'BP Log', printFn: printBPLog,                   recordsFor: m => m.records.filter(r => r.vitals?.systolic) },
-      growth:     { label: 'Growth Chart', printFn: printGrowthChart,       recordsFor: m => m.records.filter(r => r.vitals?.weight) },
-      annual:     { label: 'Annual Report', printFn: printAnnualReport,     recordsFor: m => { const y = String(new Date().getFullYear()); return m.records.filter(r => r.date && r.date.startsWith(y)); } }
+      summary:    { label: 'Health Summary', printFn: printHealthSummary,   recordsFor: m => live(m.records) },
+      vaccine:    { label: 'Vaccine Record', printFn: printVaccineCard,     recordsFor: m => live(m.records).filter(r => r.type === 'Vaccine') },
+      medication: { label: 'Medication List', printFn: printMedicationList, recordsFor: m => live(m.records).filter(r => r.type === 'Medication') },
+      lab:        { label: 'Lab Results', printFn: printLabSummary,         recordsFor: m => live(m.records).filter(r => r.type === 'Lab Test' || r.type === 'Checkup') },
+      bp:         { label: 'BP Log', printFn: printBPLog,                   recordsFor: m => live(m.records).filter(r => r.vitals?.systolic) },
+      growth:     { label: 'Growth Chart', printFn: printGrowthChart,       recordsFor: m => live(m.records).filter(r => r.vitals?.weight) },
+      annual:     { label: 'Annual Report', printFn: printAnnualReport,     recordsFor: m => { const y = String(new Date().getFullYear()); return live(m.records).filter(r => r.date && r.date.startsWith(y)); } }
     };
 
     let reportPreviewState = null; // { reportKey, memberId, attachments: [{key, record, att}] }
@@ -2989,7 +2993,7 @@
       const latest = getLatestVitals(m);
       const bmi = calcBmi(m.height, latest.weight);
       const bloodAttData = await resolveAttachmentData(m.bloodTypeAttachment);
-      const attachmentsHtml = await buildAttachmentsSectionHtml(m.records, selectedAttachmentKeys);
+      const attachmentsHtml = await buildAttachmentsSectionHtml(live(m.records), selectedAttachmentKeys);
 
       const recordsHtml = recordsByDateDesc(m).map(r => `
         <tr>
@@ -3052,7 +3056,7 @@
           <div class="info-box"><div class="label">Glucose</div><div class="value">${latest.glucose || '--'} mmol/L</div></div>
         </div>
 
-        <h2>All Records (${m.records.length})</h2>
+        <h2>All Records (${live(m.records).length})</h2>
         <table>
           <tr><th>Date</th><th>Type</th><th>Title</th><th>Details</th></tr>
           ${recordsHtml || '<tr><td colspan="4" style="text-align:center;">No records</td></tr>'}
@@ -3070,7 +3074,7 @@
       if (!m) return;
       const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
 
-      const vaccines = m.records.filter(r => r.type === 'Vaccine').sort((a,b) => new Date(a.date) - new Date(b.date));
+      const vaccines = live(m.records).filter(r => r.type === 'Vaccine').sort((a,b) => new Date(a.date) - new Date(b.date));
       const vaccineRows = vaccines.map((v, i) => `
         <tr>
           <td>${i + 1}</td>
@@ -3127,7 +3131,7 @@
       const m = members.find(x => x.id === memberId);
       if (!m) return;
 
-      const meds = m.records.filter(r => r.type === 'Medication').sort((a,b) => new Date(b.date) - new Date(a.date));
+      const meds = live(m.records).filter(r => r.type === 'Medication').sort((a,b) => new Date(b.date) - new Date(a.date));
       const medRows = meds.map(med => `
         <tr>
           <td>${escapeHtml(med.title)}</td>
@@ -3180,7 +3184,7 @@
       const m = members.find(x => x.id === memberId);
       if (!m) return;
 
-      const labs = m.records.filter(r => r.type === 'Lab Test' || r.type === 'Checkup').sort((a,b) => new Date(b.date) - new Date(a.date));
+      const labs = live(m.records).filter(r => r.type === 'Lab Test' || r.type === 'Checkup').sort((a,b) => new Date(b.date) - new Date(a.date));
 
       let labRows = '';
       labs.forEach(lab => {
@@ -3243,7 +3247,7 @@
       const m = members.find(x => x.id === memberId);
       if (!m) return;
 
-      const bpRecords = m.records.filter(r => r.vitals?.systolic).sort((a,b) => new Date(a.date) - new Date(b.date));
+      const bpRecords = live(m.records).filter(r => r.vitals?.systolic).sort((a,b) => new Date(a.date) - new Date(b.date));
 
       let bpRows = '';
       let totalSys = 0, totalDia = 0, count = 0;
@@ -3327,7 +3331,7 @@
       if (!m) return;
       const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
 
-      const weightRecords = m.records.filter(r => r.vitals?.weight).sort((a,b) => new Date(a.date) - new Date(b.date));
+      const weightRecords = live(m.records).filter(r => r.vitals?.weight).sort((a,b) => new Date(a.date) - new Date(b.date));
 
       let growthRows = '';
       weightRecords.forEach(r => {
@@ -3393,14 +3397,14 @@
       const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
       const year = new Date().getFullYear();
 
-      const yearRecords = m.records.filter(r => r.date.startsWith(year.toString()));
+      const yearRecords = live(m.records).filter(r => r.date.startsWith(year.toString()));
       const checkups = yearRecords.filter(r => r.type === 'Checkup').length;
       const vaccines = yearRecords.filter(r => r.type === 'Vaccine').length;
       const illnesses = yearRecords.filter(r => r.type === 'Illness').length;
       const medications = yearRecords.filter(r => r.type === 'Medication').length;
 
       const typeBreakdown = {};
-      m.records.forEach(r => {
+      live(m.records).forEach(r => {
         typeBreakdown[r.type] = (typeBreakdown[r.type] || 0) + 1;
       });
 
@@ -3453,7 +3457,7 @@
         <table>
           <tr><th>Record Type</th><th>Total Count</th></tr>
           ${breakdownRows}
-          <tr style="font-weight:bold;background:#ccfbf1;"><td>Total Records</td><td>${m.records.length}</td></tr>
+          <tr style="font-weight:bold;background:#ccfbf1;"><td>Total Records</td><td>${live(m.records).length}</td></tr>
         </table>
 
         <div class="goals">
@@ -4076,7 +4080,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
 
     function insAnnualPremium(m) {
       const mult = { Monthly: 12, Quarterly: 4, Yearly: 1, Single: 0 };
-      return m.insurance.policies.filter(p => p.status !== 'Discontinued').reduce((sum, p) => sum + (Number(p.premium)||0) * (mult[p.frequency] ?? 1), 0);
+      return live(m.insurance.policies).filter(p => p.status !== 'Discontinued').reduce((sum, p) => sum + (Number(p.premium)||0) * (mult[p.frequency] ?? 1), 0);
     }
 
     const INS_TYPE_DISPLAY_OVERRIDES = { 'Home': 'Home/Fire', 'Accident': 'Personal Accident' };
@@ -4090,8 +4094,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     }
 
     function insEffectiveSumInsured(c) {
-      if (c.reducing && c.sumInsuredHistory && c.sumInsuredHistory.length) {
-        const latest = [...c.sumInsuredHistory].sort((a,b) => new Date(b.date) - new Date(a.date))[0];
+      const liveHistory = live(c.sumInsuredHistory || []);
+      if (c.reducing && liveHistory.length) {
+        const latest = [...liveHistory].sort((a,b) => new Date(b.date) - new Date(a.date))[0];
         return Number(latest.amount) || 0;
       }
       return Number(c.sumInsured) || 0;
@@ -4121,7 +4126,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
 
     function insGenerateReminders(m) {
       const reminders = [];
-      m.insurance.policies.filter(p => p.status !== 'Discontinued').forEach(p => {
+      m.insurance.policies.filter(p => p.status !== 'Discontinued' && !p.deletedAt).forEach(p => {
         const d = insDaysUntil(p.expiry);
         if (d !== null) {
           reminders.push({
@@ -4217,8 +4222,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
 
     function insRenderOverview(m, reminders) {
       const upcoming = reminders.filter(r => r.status !== 'ok').length;
-      const totalClaims = m.insurance.claims.length;
-      const activePolicies = m.insurance.policies.filter(p => p.status !== 'Discontinued');
+      const totalClaims = live(m.insurance.claims).length;
+      const activePolicies = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
 
       const insuredByType = {};
       const assetByType = {};
@@ -4306,7 +4311,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     }
 
     function insRenderPolicies(m) {
-      const active = m.insurance.policies.filter(p => p.status !== 'Discontinued');
+      const active = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
       return `
         <div class="card">
           <div class="card-title">📄 Policies</div>
@@ -4316,7 +4321,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     }
 
     function insRenderDiscontinued(m) {
-      const discontinued = m.insurance.policies.filter(p => p.status === 'Discontinued');
+      const discontinued = live(m.insurance.policies).filter(p => p.status === 'Discontinued');
       return `
         <div class="card">
           <div class="card-title">🚫 Discontinued / Terminated Policies</div>
@@ -4331,7 +4336,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const tagClass = d === null ? 'tag-gray' : d < 0 ? 'tag-red' : d <= 30 ? 'tag-yellow' : 'tag-green';
       const tagText = d === null ? 'No expiry set' : d < 0 ? `Overdue ${Math.abs(d)}d` : d === 0 ? 'Due today' : `Due in ${d}d`;
       const surrenderTotal = insLatestSurrenderTotal(p);
-      const coverages = p.coverages || [];
+      const coverages = live(p.coverages || []);
       const payout = p.payout && p.payout.startYear ? insNextPayoutInfo(p) : null;
       return `
         <div class="policy-card">
@@ -4357,9 +4362,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           ${coverages.length ? `<div class="s-097e6af4">${coverages.map(c => insRenderCoverageSummary(m, p, c)).join('')}</div>` : '<p class="s-e1b40251">No coverage details added yet — click ✏️ to add.</p>'}
           ${payout ? `<div class="s-406b76fd">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} · next payout ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</div>` : ''}
           ${p.premiumPaidByBonus ? `<div class="s-e6bec453">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</div>` : ''}
-          ${(p.attachments && p.attachments.length) ? `<div class="s-eae4831c">${p.attachments.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${escapeHtml(p.id)}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+          ${(() => { const liveAtts = live(p.attachments || []); return liveAtts.length ? `<div class="s-eae4831c">${liveAtts.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${escapeHtml(p.id)}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''; })()}
           ${p.notes ? `<div class="s-ca2edd98">${escapeHtml(p.notes)}</div>` : ''}
-          ${(p.riders && p.riders.length) ? `<div class="s-eae4831c">${p.riders.map(r => {
+          ${(() => { const liveRiders = live(p.riders || []); return liveRiders.length ? `<div class="s-eae4831c">${liveRiders.map(r => {
             const rd = insDaysUntil(r.dueDate);
             const isExpired = rd !== null && rd < 0;
             const rc = rd === null ? 'tag-gray' : isExpired ? 'tag-red' : rd <= 30 ? 'tag-yellow' : 'tag-green';
@@ -4368,9 +4373,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
               ? `${escapeHtml(r.description)} · Expired ${escapeHtml(r.dueDate||'')}`
               : `${escapeHtml(r.description)}${r.dueDate ? ' · ' + escapeHtml(r.dueDate) : ''}`;
             return `<span class="tag ${rc}" title="${isExpired ? 'Expired on' : 'Due'} ${escapeHtml(r.dueDate||'--')}">${icon} ${label}</span>`;
-          }).join('')}</div>` : ''}
+          }).join('')}</div>` : ''; })()}
           <div class="s-79744520">
-            <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${escapeHtml(p.id)}">📒 Ledger (${(p.ledger||[]).length})</button>
+            <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${escapeHtml(p.id)}">📒 Ledger (${live(p.ledger||[]).length})</button>
             ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${escapeHtml(p.id)}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span data-ins-open-surrender="${escapeHtml(p.id)}" class="s-41b07b38">+ Track Surrender Value</span>`}
             <button class="btn btn-secondary btn-sm" data-ins-open-report="${escapeHtml(p.id)}">🖨️ View / Print</button>
           </div>
@@ -4397,7 +4402,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             ${c.annualLimit ? `<div><div class="policy-field-label">Annual Limit</div><div class="policy-field-value">${insFmtMoney(c.annualLimit)}</div></div>` : ''}
             ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime)} <span class="s-5594ca44">/ ${insFmtMoney(c.lifetimeLimit)}</span></div></div>` : ''}
           </div>` : ''}
-          ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${escapeHtml(p.id)}" data-ins-cov-id="${escapeHtml(c.id)}" class="s-c0623ab3">📉 View / Update Sum Insured History (${(c.sumInsuredHistory||[]).length})</span></div>` : ''}
+          ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${escapeHtml(p.id)}" data-ins-cov-id="${escapeHtml(c.id)}" class="s-c0623ab3">📉 View / Update Sum Insured History (${live(c.sumInsuredHistory||[]).length})</span></div>` : ''}
         </div>
       `;
     }
@@ -4406,7 +4411,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       return `
         <div class="card">
           <div class="card-title">🧾 Claims</div>
-          ${m.insurance.claims.length ? m.insurance.claims.map(c => insRenderClaimCard(m, c)).join('') : '<p class="s-51f2817c">No claims filed yet.</p>'}
+          ${live(m.insurance.claims).length ? live(m.insurance.claims).map(c => insRenderClaimCard(m, c)).join('') : '<p class="s-51f2817c">No claims filed yet.</p>'}
         </div>
       `;
     }
@@ -4484,7 +4489,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.querySelectorAll('[data-ins-open-attachment]').forEach(el => el.addEventListener('click', (e) => {
         e.stopPropagation();
         const p = m.insurance.policies.find(x => x.id === el.dataset.insOpenAttachment);
-        const att = p && p.attachments ? p.attachments[parseInt(el.dataset.insAttIdx)] : null;
+        const att = p ? live(p.attachments || [])[parseInt(el.dataset.insAttIdx)] : null;
         openAttachment(att);
       }));
       document.querySelectorAll('[data-ins-open-sumhistory]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); insOpenSumHistoryModal(el.dataset.insOpenSumhistory, el.dataset.insCovId); }));
@@ -4792,17 +4797,19 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPremium)}</div><div class="stat-label">Total Premium Paid</div></div>
           <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPayout)}</div><div class="stat-label">Total Payout Received</div></div>
         </div>`;
-      const entries = [...(p.ledger||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
+      const entries = live(p.ledger).sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
         container.innerHTML = '<p class="s-51f2817c">No payment transactions recorded yet.</p>';
         return;
       }
-      container.innerHTML = entries.map(l => `
+      container.innerHTML = entries.map(l => {
+        const liveAtts = live(l.attachments || []);
+        return `
         <div class="s-952fb81a s-ledger-row" data-ledger-row-id="${escapeHtml(l.id)}">
           <div>
             <div class="s-ea8a0de7">${l.type === 'payout' ? '💰' : '💸'} ${escapeHtml(l.date||'--')} <span class="s-5ea608c5">· ${escapeHtml(l.method||'--')}</span></div>
             ${l.notes ? `<div class="s-c16bedce">${escapeHtml(l.notes)}</div>` : ''}
-            ${(l.attachments && l.attachments.length) ? `<div class="s-bb680ec5">${l.attachments.map((att, idx) => `<span data-ins-open-ledger-att="${escapeHtml(l.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+            ${liveAtts.length ? `<div class="s-bb680ec5">${liveAtts.map((att, idx) => `<span data-ins-open-ledger-att="${escapeHtml(l.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
           </div>
           <div class="s-3b6fff87">
             <div class="${l.type === 'payout' ? 's-ledger-payout' : 's-ledger-expense'}">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</div>
@@ -4810,10 +4817,11 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             <span data-ins-remove-ledger="${escapeHtml(l.id)}" class="s-abe8a067">🗑️</span>
           </div>
         </div>
-      `).join('');
+      `;
+      }).join('');
       container.querySelectorAll('[data-ins-open-ledger-att]').forEach(el => el.addEventListener('click', () => {
         const l = p.ledger.find(x => x.id === el.dataset.insOpenLedgerAtt);
-        const att = l && l.attachments ? l.attachments[parseInt(el.dataset.insAttIdx)] : null;
+        const att = l ? live(l.attachments || [])[parseInt(el.dataset.insAttIdx)] : null;
         openAttachment(att);
       }));
       container.querySelectorAll('[data-ins-edit-ledger]').forEach(el => el.addEventListener('click', () => {
@@ -4962,12 +4970,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Total Surrender Value</div><div class="stat-value s-bffeb9ae">${total === null ? '--' : insFmtMoney(total)}</div></div>`;
 
       const container = document.getElementById('insSurrenderList');
-      const entries = [...(p.surrenderRecords||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
+      const entries = live(p.surrenderRecords).sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
         container.innerHTML = '<p class="s-51f2817c">No statement records yet. Add one below using figures from your latest Statement of Account.</p>';
         return;
       }
-      container.innerHTML = entries.map(r => `
+      container.innerHTML = entries.map(r => {
+        const liveAtts = live(r.attachments || []);
+        return `
         <div class="s-198fb7f4">
           <div class="s-2447f692">
             <div class="s-ea8a0de7">${escapeHtml(r.date||'--')}</div>
@@ -4980,12 +4990,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="s-ebc463b1">
             Bonus ${insFmtMoney(r.accumulatedBonus)} · Investment Fund Value ${insFmtMoney(r.dividend)} · Guaranteed ${insFmtMoney(r.guaranteedCashValue)} · Non-Guaranteed ${insFmtMoney(r.nonGuaranteedValue)}
           </div>
-          ${(r.attachments && r.attachments.length) ? `<div class="s-bb680ec5">${r.attachments.map((att, idx) => `<span data-ins-open-surrender-att="${escapeHtml(r.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
+          ${liveAtts.length ? `<div class="s-bb680ec5">${liveAtts.map((att, idx) => `<span data-ins-open-surrender-att="${escapeHtml(r.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
         </div>
-      `).join('');
+      `;
+      }).join('');
       container.querySelectorAll('[data-ins-open-surrender-att]').forEach(el => el.addEventListener('click', () => {
         const r = p.surrenderRecords.find(x => x.id === el.dataset.insOpenSurrenderAtt);
-        const att = r && r.attachments ? r.attachments[parseInt(el.dataset.insAttIdx)] : null;
+        const att = r ? live(r.attachments || [])[parseInt(el.dataset.insAttIdx)] : null;
         openAttachment(att);
       }));
       container.querySelectorAll('[data-ins-edit-surrender]').forEach(el => el.addEventListener('click', () => {
@@ -5116,7 +5127,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Sum Insured</div><div class="stat-value s-bffeb9ae">${insFmtMoney(insEffectiveSumInsured(c))}</div></div>`;
 
       const container = document.getElementById('insSumHistoryList');
-      const entries = [...(c.sumInsuredHistory||[])].sort((a,b) => new Date(b.date) - new Date(a.date));
+      const entries = live(c.sumInsuredHistory).sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
         container.innerHTML = '<p class="s-51f2817c">No history yet. Add the initial amount and each year\'s reduced amount below.</p>';
         return;
@@ -5181,9 +5192,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === currentMemberId);
       if (!m) { alert('Select or add a family member first'); return; }
       insEnsureData(m);
-      if (!m.insurance.policies.length) { alert('Add a policy for this member first'); return; }
+      if (!live(m.insurance.policies).length) { alert('Add a policy for this member first'); return; }
       const sel = document.getElementById('insCPolicyId');
-      sel.innerHTML = m.insurance.policies.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}</option>`).join('');
+      sel.innerHTML = live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}</option>`).join('');
       const c = id ? m.insurance.claims.find(x => x.id === id) : null;
       document.getElementById('insClaimModalTitle').textContent = id ? 'Edit Claim' : 'Add Claim';
       if (c) sel.value = c.policyId;
@@ -5199,7 +5210,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insPopulateCoverageSelect(m, policyId, selectedCoverageId) {
       const p = m.insurance.policies.find(x => x.id === policyId);
       const covSel = document.getElementById('insCCoverageId');
-      const coverages = p ? (p.coverages || []) : [];
+      const coverages = p ? live(p.coverages || []) : [];
       if (!coverages.length) {
         covSel.innerHTML = '<option value="">(no coverage details on this policy)</option>';
         return;
@@ -5238,7 +5249,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === memberId);
       const sel = document.getElementById('insRPolicyId');
       sel.innerHTML = '<option value="all">📋 All Policies (full summary)</option>' +
-        m.insurance.policies.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
+        live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
       sel.value = preselectPolicyId || 'all';
       document.getElementById('insRIncludeDiscontinued').checked = false;
       document.getElementById('insReportModal').classList.add('active');
@@ -5314,16 +5325,16 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       let policiesToShow;
       let reportTitle;
       if (selectedId === 'all') {
-        policiesToShow = m.insurance.policies.filter(p => includeDiscontinued || p.status !== 'Discontinued');
+        policiesToShow = live(m.insurance.policies).filter(p => includeDiscontinued || p.status !== 'Discontinued');
         reportTitle = `Insurance Report — ${m.name}`;
       } else {
-        policiesToShow = m.insurance.policies.filter(p => p.id === selectedId);
+        policiesToShow = live(m.insurance.policies).filter(p => p.id === selectedId);
         reportTitle = `Policy Report — ${m.name}`;
       }
 
       let summaryHtml = '';
       if (selectedId === 'all') {
-        const activePolicies = m.insurance.policies.filter(p => p.status !== 'Discontinued');
+        const activePolicies = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
         const insuredByType = {};
         const assetByType = {};
         const ASSET_TYPES = ['Home', 'Car'];
