@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v38';
+    const APP_VERSION = 'v39';
     const APP_VERSION_DATE = '2026-09-18';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -1500,6 +1500,7 @@
       bindEvents();
       renderMemberList();
       renderMain();
+      updateConflictBadge();
     }
 
     // Encrypts the ENTIRE app data blob (all members: health + insurance) before
@@ -1585,9 +1586,101 @@
       renderMain();
     }
 
+    // Human-readable labels for the modal - kept separate from any
+    // internal field/container key names so this can be reworded freely.
+    const CONFLICT_FIELD_LABELS = {
+      name: 'Name', nameZh: 'Chinese name', gender: 'Gender', birth: 'Date of birth',
+      blood: 'Blood type', height: 'Height', allergies: 'Allergies', emergency: 'Emergency contact',
+      bloodTypeAttachment: 'Blood type document'
+    };
+    const CONFLICT_CONTAINER_LABELS = {
+      records: 'Health record', customReminders: 'Reminder', historyEntries: 'Medical history note',
+      policies: 'Policy', ledger: 'Premium payment', riders: 'Rider',
+      coverages: 'Coverage', sumInsuredHistory: 'Sum insured entry', surrenderRecords: 'Surrender/statement record',
+      claims: 'Claim'
+    };
+    // A short one-line summary per entity type, for the two "before/after"
+    // columns - design 2.7 explicitly wants no inline diffing, just enough
+    // to tell the two versions apart at a glance.
+    function summarizeConflictSide(containerKey, obj) {
+      if (obj === null || obj === undefined) return '(none)';
+      if (typeof obj !== 'object') return escapeHtml(String(obj)); // field-level conflicts are plain values
+      switch (containerKey) {
+        case 'records': return escapeHtml(`${obj.title || obj.type || 'Record'} · ${obj.date || ''}`);
+        case 'customReminders': return escapeHtml(`${obj.title || 'Reminder'} · due ${obj.dueDate || ''}`);
+        case 'historyEntries': return escapeHtml(obj.text || '');
+        case 'policies': return escapeHtml(`${obj.provider || ''} ${obj.number || ''} · ${insFmtMoney(obj.premium)}/${obj.frequency || ''}`);
+        case 'ledger': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount)} (${obj.method || ''})`);
+        case 'riders': return escapeHtml(`${obj.description || ''} · due ${obj.dueDate || ''}`);
+        case 'coverages': return escapeHtml(`${obj.customLabel || obj.type || ''} · sum insured ${insFmtMoney(obj.sumInsured)}`);
+        case 'sumInsuredHistory': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount)}`);
+        case 'surrenderRecords': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(insSurrenderRecordTotal(obj))}`);
+        case 'claims': return escapeHtml(`${obj.date || ''} · ${obj.status || ''} · claimed ${insFmtMoney(obj.amountClaimed)}`);
+        default: return escapeHtml(JSON.stringify(obj).slice(0, 120));
+      }
+    }
+
+    function renderConflictModal() {
+      const active = getActiveConflicts();
+      const body = document.getElementById('conflictListBody');
+      const btn = document.getElementById('btnConflicts');
+      const countEl = document.getElementById('conflictCount');
+      countEl.textContent = active.length;
+      btn.style.display = active.length ? '' : 'none';
+
+      if (!active.length) {
+        body.innerHTML = '<p class="s-51f2817c">No pending conflicts.</p>';
+        return;
+      }
+
+      body.innerHTML = active.map((c, i) => {
+        const label = c.field
+          ? (CONFLICT_FIELD_LABELS[c.field] || c.field)
+          : (CONFLICT_CONTAINER_LABELS[c.path[c.path.length - 2]] || 'Item');
+        const containerKey = c.field ? null : c.path[c.path.length - 2];
+        const localSummary = summarizeConflictSide(containerKey, c.local);
+        const remoteSummary = summarizeConflictSide(containerKey, c.remote);
+        const allowBoth = !c.field; // "keep both" only makes sense for array-item entities, not a single scalar field
+        return `
+          <div class="s-198fb7f4" data-conflict-idx="${i}">
+            <div class="s-ea8a0de7">${escapeHtml(c.memberName)} — ${escapeHtml(label)}</div>
+            <div class="s-ebc463b1">Your version: ${localSummary}</div>
+            <div class="s-ebc463b1">Their version: ${remoteSummary}</div>
+            <div class="s-79744520">
+              <button class="btn btn-secondary btn-sm" data-conflict-choice="local" data-conflict-idx="${i}">Keep Mine</button>
+              <button class="btn btn-secondary btn-sm" data-conflict-choice="remote" data-conflict-idx="${i}">Keep Theirs</button>
+              ${allowBoth ? `<button class="btn btn-secondary btn-sm" data-conflict-choice="both" data-conflict-idx="${i}">Keep Both</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      body.querySelectorAll('[data-conflict-choice]').forEach(el => {
+        el.addEventListener('click', () => {
+          const idx = parseInt(el.dataset.conflictIdx);
+          const conflict = active[idx];
+          resolveConflict(conflict, el.dataset.conflictChoice);
+          renderConflictModal();
+          renderMain(); // the resolved field/entity may be visible on the current tab
+        });
+      });
+    }
+
+    function openConflictModal() {
+      renderConflictModal();
+      document.getElementById('conflictModal').classList.add('active');
+    }
+    function updateConflictBadge() {
+      const active = getActiveConflicts();
+      document.getElementById('conflictCount').textContent = active.length;
+      document.getElementById('btnConflicts').style.display = active.length ? '' : 'none';
+    }
+
     // ========== EVENT BINDING ==========
     function bindEvents() {
       // Header buttons
+      document.getElementById('btnConflicts').addEventListener('click', openConflictModal);
+      document.getElementById('btnCloseConflicts').addEventListener('click', () => document.getElementById('conflictModal').classList.remove('active'));
       document.getElementById('btnExport').addEventListener('click', () => openExportOptionsModal('all'));
       document.getElementById('btnExportMember').addEventListener('click', () => openExportOptionsModal('member'));
       document.getElementById('btnImport').addEventListener('click', () => document.getElementById('importFile').click());
@@ -3808,6 +3901,167 @@
       return added;
     }
 
+    // Locates the CURRENT live entity a queued conflict refers to, by
+    // walking conflict.path against the live `members` array. Paths look
+    // like [memberId, 'records', recordId] or, for nested insurance data,
+    // [memberId, 'insurance', 'policies', policyId, 'coverages', coverageId,
+    // 'sumInsuredHistory', historyId] - 'insurance' is a plain nested
+    // object (no id of its own), everything else is an array keyed by id,
+    // so this walks token-by-token rather than assuming strict key/id
+    // pairing the whole way. Returns null if anything in the chain no
+    // longer exists (member/entity deleted or never matched - the conflict
+    // is stale either way and the caller should drop it).
+    function resolveConflictEntity(conflict) {
+      const m = members.find(x => x.id === conflict.memberId);
+      if (!m) return null;
+      if (conflict.field) return { kind: 'field', member: m };
+
+      const path = conflict.path || [];
+      let node = m;
+      let i = 1;
+      while (i < path.length) {
+        const key = path[i];
+        const val = node[key];
+        if (Array.isArray(val)) {
+          const id = path[i + 1];
+          const foundIdx = val.findIndex(x => x.id === id);
+          if (foundIdx === -1) return null;
+          if (i + 2 >= path.length) {
+            return { kind: 'array', containerKey: key, arr: val, idx: foundIdx, entity: val[foundIdx] };
+          }
+          node = val[foundIdx];
+          i += 2;
+        } else if (val && typeof val === 'object') {
+          node = val; // plain nested object (e.g. 'insurance') - no id to consume
+          i += 1;
+        } else {
+          return null; // malformed/unrecognized path
+        }
+      }
+      return null;
+    }
+
+    // Container types whose entities have nested syncable children that
+    // are ALREADY correctly merged into the live entity (attachments,
+    // sumInsuredHistory, ledger/coverages/riders/surrenderRecords under a
+    // policy) - a "keep remote"/"keep both" resolution must only touch the
+    // scalar fields actually in dispute for these, never blindly overwrite
+    // the whole object, or it would discard that already-merged child data.
+    // Sourced from FHSMerge's own exported key lists so this can't drift
+    // from what the merge engine actually used to detect the conflict.
+    // Types with no entry here (riders, sumInsuredHistory, historyEntries)
+    // have no nested children, so a full-object apply is safe for them.
+    const CONTAINER_SCALAR_KEYS = {
+      records: FHSMerge.RECORD_SCALAR_KEYS,
+      customReminders: FHSMerge.REMINDER_SCALAR_KEYS,
+      ledger: FHSMerge.LEDGER_SCALAR_KEYS,
+      coverages: FHSMerge.COVERAGE_SCALAR_KEYS,
+      surrenderRecords: FHSMerge.SURRENDER_SCALAR_KEYS,
+      claims: FHSMerge.CLAIM_SCALAR_KEYS,
+      policies: FHSMerge.POLICY_SCALAR_KEYS
+    };
+
+    // Applies a resolution choice and removes the conflict from the queue.
+    // 'local'  - content already showing (conflict-output contract) - just
+    //            bump version so this exact tie won't be re-flagged later.
+    // 'remote' - apply remote's disputed fields (only those, for container
+    //            types - see CONTAINER_SCALAR_KEYS above), then bump.
+    // 'both'   - (array-item conflicts only) duplicate remote's full entity
+    //            under a fresh id via deepCloneAndRemapIds, insert next to
+    //            the original, and still bump the original to settle it.
+    function resolveConflict(conflict, choice) {
+      const resolved = resolveConflictEntity(conflict);
+      if (!resolved) { removeConflictFromQueue(conflict); return; } // already gone (e.g. deleted since) - just drop it
+
+      if (resolved.kind === 'field') {
+        const m = resolved.member;
+        if (choice === 'remote') m[conflict.field] = conflict.remote;
+        if (!m.fieldVersion) m.fieldVersion = freshFieldVersions();
+        m.fieldVersion[conflict.field] = (m.fieldVersion[conflict.field] || 1) + 1;
+        bumpVersion(m);
+      } else {
+        const { entity, arr, idx, containerKey } = resolved;
+        if (choice === 'remote') {
+          const scalarKeys = CONTAINER_SCALAR_KEYS[containerKey];
+          if (scalarKeys) {
+            scalarKeys.forEach(k => { entity[k] = conflict.remote[k]; });
+          } else {
+            const id = entity.id;
+            Object.assign(entity, conflict.remote, { id });
+          }
+          bumpVersion(entity);
+        } else if (choice === 'both') {
+          const dup = deepCloneAndRemapIds(conflict.remote);
+          Object.assign(dup, freshSyncMeta());
+          arr.splice(idx + 1, 0, dup);
+          bumpVersion(entity); // settles the original's side of the tie too
+        } else {
+          bumpVersion(entity); // 'local' - content unchanged, just settle
+        }
+      }
+
+      saveData();
+      removeConflictFromQueue(conflict);
+    }
+
+    function removeConflictFromQueue(conflict) {
+      const queue = loadConflictQueue();
+      const key = conflictKey(conflict);
+      const next = queue.filter(c => conflictKey(c) !== key);
+      saveConflictQueue(next);
+    }
+
+    // Prunes the persisted queue per design 1.6/1.7: an entry is dropped
+    // (not shown) once the local entity's version has moved past its
+    // baseVersion (already resolved - by this device or a synced-in
+    // resolution from elsewhere), once the entity/member no longer exists,
+    // or once any ancestor in its chain is now tombstoned (cascade
+    // suppression - a conflict under a deleted policy is meaningless to
+    // show). Persists the pruned result so stale entries don't keep
+    // reappearing on every call. Returns the list that should actually render.
+    function getActiveConflicts() {
+      const queue = loadConflictQueue();
+      const active = [];
+      let changed = false;
+      queue.forEach(c => {
+        const resolved = resolveConflictEntity(c);
+        if (!resolved) { changed = true; return; } // dropped: gone entirely
+
+        if (resolved.kind === 'field') {
+          const currentVersion = (resolved.member.fieldVersion || {})[c.field] || 1;
+          if (currentVersion > c.baseVersion) { changed = true; return; } // already resolved elsewhere
+          active.push(c);
+        } else {
+          if (resolved.entity.version > c.baseVersion) { changed = true; return; }
+          // cascade suppression: walk the path's intermediate array-items
+          // for a tombstone (the member itself is checked separately -
+          // a tombstoned member's conflicts are equally meaningless).
+          if (resolved.member && resolved.member.deletedAt) { changed = true; return; }
+          const path = c.path || [];
+          let node = members.find(x => x.id === c.memberId);
+          let ancestorDeleted = false;
+          let i = 1;
+          while (node && i < path.length) {
+            const key = path[i];
+            const val = node[key];
+            if (Array.isArray(val)) {
+              const id = path[i + 1];
+              const item = val.find(x => x.id === id);
+              if (!item) break;
+              if (item.id !== c.entityId && item.deletedAt) { ancestorDeleted = true; break; }
+              node = item; i += 2;
+            } else if (val && typeof val === 'object') {
+              node = val; i += 1;
+            } else break;
+          }
+          if (ancestorDeleted) { changed = true; return; }
+          active.push(c);
+        }
+      });
+      if (changed) saveConflictQueue(active);
+      return active;
+    }
+
     async function mergeImportedMembers(normalized) {
       let totalNewConflicts = 0;
       for (const incoming of normalized) {
@@ -3847,12 +4101,13 @@
       }
       renderMemberList();
       renderMain();
+      updateConflictBadge();
       if (totalNewConflicts > 0) {
-        // Minimal, honest signal until the real conflict-review screen
-        // (build order step 5) exists: nothing was lost - the other side's
-        // version is saved in the queue, your device's version is what's
-        // showing for now, per the conflict-output contract (design 1.5).
-        alert(`Import merged. ${totalNewConflicts} item(s) had edits on both sides for the same thing - your device's version was kept for now, and the other version was saved for review. A conflict review screen is coming in a future update.`);
+        // Nothing was lost - the other side's version is saved in the
+        // queue for review (conflict-output contract, design 1.5). The
+        // ⚠️ Conflicts button in the header (now visible) opens the
+        // review screen built in build order step 5.
+        alert(`Import merged. ${totalNewConflicts} item(s) had edits on both sides for the same thing - your device's version was kept for now. Click "⚠️ Conflicts" in the header to review and resolve them.`);
       }
     }
 

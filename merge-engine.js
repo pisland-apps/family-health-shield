@@ -120,12 +120,17 @@ function mergeSyncArray(localArr, remoteArr, opts) {
           winner = Object.assign({}, l);
         } else {
           if (!ancestorTombstoned) {
+            // Store the FULL entities, not the scalarKeys-projected ones
+            // used for the equality/conflict check above - a "keep both"
+            // resolution (duplicating the remote side as a new record) or
+            // simply "keep remote" needs the complete object (attachments
+            // included), not just the fields that were compared.
             conflicts.push({
               entityId: id,
               baseVersion: l.version,
               path: path.concat([id]),
-              local: lProj,
-              remote: rProj
+              local: l,
+              remote: r
             });
           }
           // Conflict-output contract (design 1.5): keep local content,

@@ -640,6 +640,7 @@
       <h1>🏥🛡️ Family Health & Shield</h1>
     </div>
     <div class="header-actions">
+      <button class="btn btn-secondary btn-sm" id="btnConflicts" style="display:none;">⚠️ Conflicts (<span id="conflictCount">0</span>)</button>
       <button class="btn btn-secondary btn-sm" id="btnExport">📥 Export All</button>
       <button class="btn btn-secondary btn-sm" id="btnExportMember">📤 Export Member</button>
       <button class="btn btn-secondary btn-sm" id="btnImport">📥 Import</button>
@@ -884,6 +885,20 @@
       <div class="modal-actions">
         <button class="btn btn-secondary" id="btnCancelReminder">Cancel</button>
         <button class="btn btn-primary" id="btnSaveReminder">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Conflict Review Modal (build order step 5) -->
+  <div class="modal-overlay" id="conflictModal">
+    <div class="modal" style="max-width:640px;">
+      <div class="modal-header">⚠️ Review Conflicting Edits</div>
+      <div class="s-06d0d891">
+        These fields or entries were edited on both sides since the last sync. Your device's version is showing for each right now — pick which to keep, or (where offered) keep both as separate entries.
+      </div>
+      <div id="conflictListBody"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="btnCloseConflicts">Close</button>
       </div>
     </div>
   </div>
