@@ -2,13 +2,30 @@
 // Pure functions implementing the field/array-level merge described in
 // MERGE_SYNC_DESIGN.md. No DOM, no I/O, no randomness, no wall-clock reads
 // except inside a couple of helpers that are never called during a merge
-// itself (kept here only because app.js also uses this file's helpers).
+// itself.
 //
-// Entry point: mergeMembers(localMembers, remoteMembers) -> { members, conflicts }
+// Entry point: FHSMerge.mergeMembers(localMembers, remoteMembers) ->
+//   { members, conflicts }
 //
-// Loaded as a plain <script> in the browser (everything below becomes
-// global, same as app.js's own functions) AND as a CommonJS module under
-// Node for merge-engine.test.js. See the UMD-lite export at the bottom.
+// Everything below is wrapped in a UMD factory rather than left as bare
+// top-level `const`/`function` declarations, DELIBERATELY: this file is
+// loaded as a plain <script> alongside app.js's own (much larger) global
+// script, and several of the shorter names here (MEMBER_SCALAR_FIELDS,
+// freshFieldVersions) already exist as app.js globals for its own local-
+// editing needs. Two top-level `const` declarations of the same name
+// across separate <script> tags in the same page throw a SyntaxError at
+// parse time and would take the ENTIRE app down - not just silently
+// misbehave. The factory function below gives every name here its own
+// scope; only the single `FHSMerge` object is actually exposed globally
+// (or via module.exports under Node for merge-engine.test.js).
+(function (root, factory) {
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = factory();
+  } else {
+    root.FHSMerge = factory();
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
 
 // ---------- generic helpers ----------
 
@@ -22,6 +39,7 @@ function mergeEntityMeta(local, remote) {
 }
 
 const SYNC_META_KEYS = ['version', 'updatedAt', 'deletedAt', 'schemaVersion'];
+
 
 // Picks out just the given keys (or, with no key list, everything except
 // the sync-metadata keys) for a content-equality / conflict comparison.
@@ -328,21 +346,21 @@ function mergeMembers(localMembers, remoteMembers) {
   return { members, conflicts };
 }
 
-// ---------- UMD-lite export ----------
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    mergeMembers,
-    mergeMemberPair,
-    mergePolicyArray,
-    mergeSyncArray,
-    mergeAttachmentArray,
-    mergeMemberFields,
-    mergeEntityMeta,
-    projectForCompare,
-    deepEqual,
-    MEMBER_SCALAR_FIELDS,
-    freshFieldVersions,
-    POLICY_SCALAR_KEYS, RECORD_SCALAR_KEYS, REMINDER_SCALAR_KEYS,
-    LEDGER_SCALAR_KEYS, COVERAGE_SCALAR_KEYS, SURRENDER_SCALAR_KEYS, CLAIM_SCALAR_KEYS
-  };
-}
+// ---------- what the factory exposes as FHSMerge / module.exports ----------
+return {
+  mergeMembers,
+  mergeMemberPair,
+  mergePolicyArray,
+  mergeSyncArray,
+  mergeAttachmentArray,
+  mergeMemberFields,
+  mergeEntityMeta,
+  projectForCompare,
+  deepEqual,
+  MEMBER_SCALAR_FIELDS,
+  freshFieldVersions,
+  POLICY_SCALAR_KEYS, RECORD_SCALAR_KEYS, REMINDER_SCALAR_KEYS,
+  LEDGER_SCALAR_KEYS, COVERAGE_SCALAR_KEYS, SURRENDER_SCALAR_KEYS, CLAIM_SCALAR_KEYS
+};
+
+}); // end UMD factory

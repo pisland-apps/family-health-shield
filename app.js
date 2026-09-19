@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v37';
-    const APP_VERSION_DATE = '2026-09-17';
+    const APP_VERSION = 'v38';
+    const APP_VERSION_DATE = '2026-09-18';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -3662,11 +3662,21 @@
     // Returns the normalized array, or throws with a human-readable reason.
     function normalizeImportedMembers(data) {
       if (!Array.isArray(data)) throw new Error('Expected a JSON array of family members.');
-      return data.map((raw, i) => {
+      const normalized = data.map((raw, i) => {
         if (!raw || typeof raw !== 'object') throw new Error(`Member #${i + 1} is not a valid object.`);
         if (!raw.name || typeof raw.name !== 'string') throw new Error(`Member #${i + 1} is missing a name.`);
         return {
           id: sanitizeId(raw.id, (Date.now() + i).toString()),
+          // Sync metadata (version/updatedAt/deletedAt/schemaVersion) is
+          // passed through as-is here rather than defaulted - the
+          // migrateSyncFields() call below (same function used for local
+          // data on load) backfills anything missing exactly the way
+          // design 2.6/2.8 wants: an old export file with no `version`
+          // field becomes version 1, not silently dropped and re-created
+          // fresh, which would break merge-by-id entirely.
+          version: raw.version, updatedAt: raw.updatedAt, deletedAt: raw.deletedAt, schemaVersion: raw.schemaVersion,
+          fieldVersion: (raw.fieldVersion && typeof raw.fieldVersion === 'object') ? raw.fieldVersion : undefined,
+          historyEntries: Array.isArray(raw.historyEntries) ? raw.historyEntries : undefined,
           name: raw.name,
           nameZh: raw.nameZh || '',
           nameZhAvatarIdx: parseInt(raw.nameZhAvatarIdx) || 1,
@@ -3680,6 +3690,7 @@
           bloodTypeAttachment: (raw.bloodTypeAttachment && typeof raw.bloodTypeAttachment === 'object') ? raw.bloodTypeAttachment : null,
           customReminders: Array.isArray(raw.customReminders) ? raw.customReminders.map((cr, j) => ({
             id: sanitizeId(cr.id, freshId('cr')),
+            version: cr.version, updatedAt: cr.updatedAt, deletedAt: cr.deletedAt, schemaVersion: cr.schemaVersion,
             title: cr.title || 'Reminder',
             dueDate: cr.dueDate || new Date().toISOString().slice(0, 10),
             repeatMonths: parseInt(cr.repeatMonths) || 0,
@@ -3687,6 +3698,7 @@
           })) : [],
           records: Array.isArray(raw.records) ? raw.records.map(r => ({
             id: sanitizeId(r.id, freshId('r')),
+            version: r.version, updatedAt: r.updatedAt, deletedAt: r.deletedAt, schemaVersion: r.schemaVersion,
             date: r.date || new Date().toISOString().slice(0, 10),
             type: r.type || 'Checkup',
             title: r.title || r.type || 'Record',
@@ -3699,12 +3711,19 @@
           // sumInsuredHistory entries, riders, ledger rows, claims,
           // surrenderRecords, attachments) in place - see its comment above
           // for why this is a deep walk rather than a field-by-field remap.
+          // It preserves every OTHER field untouched, including sync
+          // metadata, so insurance data doesn't need the same manual
+          // pass-through as member/record/reminder fields above.
           insurance: (raw.insurance && typeof raw.insurance === 'object') ? {
             policies: sanitizeIdsDeep(Array.isArray(raw.insurance.policies) ? raw.insurance.policies : []),
             claims: sanitizeIdsDeep(Array.isArray(raw.insurance.claims) ? raw.insurance.claims : [])
           } : { policies: [], claims: [] }
         };
       });
+      // Backfill anything missing (old export files, or fields normalize
+      // above didn't touch) the exact same way local data gets migrated on
+      // load - see design 2.6.
+      return migrateSyncFields(normalized);
     }
 
     async function migrateMemberAttachmentsToIdb(memberList) {
@@ -3745,16 +3764,75 @@
     // matching id updates that member in place; no match (e.g. re-importing
     // onto a fresh device, or someone renamed/lost their original) offers to
     // add them as a new member instead of silently discarding the file.
+    // ========== CONFLICT QUEUE (build order step 5 builds the UI on top
+    // of this; step 4 just needs to capture and persist what mergeMembers()
+    // finds, per design 1.4 - "the queue is derived state, not a synced
+    // entity" - so it lives in its own storage key, separate from
+    // `members`/STORAGE_KEY, and is never exported/imported/synced itself) ==========
+    const CONFLICT_STORAGE_KEY = 'family_health_tracker_v3_conflicts';
+
+    function loadConflictQueue() {
+      try {
+        const raw = localStorage.getItem(CONFLICT_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) { return []; }
+    }
+    function saveConflictQueue(queue) {
+      try { localStorage.setItem(CONFLICT_STORAGE_KEY, JSON.stringify(queue)); return true; }
+      catch (e) { return false; }
+    }
+    // Deterministic key per design 1.3/1.4 - (entityId, baseVersion[, field]).
+    // Two independent merges (or two chained ones - see MERGE_SYNC_DESIGN.md
+    // 2.4's note on re-derived conflicts) that find "the same" disagreement
+    // produce the same key, so appending must dedupe on this rather than
+    // push raw, or the same conflict could appear more than once.
+    function conflictKey(c) {
+      return JSON.stringify([c.entityId, c.field || null, c.baseVersion]);
+    }
+    // Appends new conflicts (deduped) for one member's merge, tagged with
+    // enough context for a future queue UI to render without re-deriving
+    // anything. Returns how many were genuinely new (not already queued).
+    function appendConflicts(memberId, memberName, newConflicts) {
+      if (!newConflicts || !newConflicts.length) return 0;
+      const queue = loadConflictQueue();
+      const existingKeys = new Set(queue.map(conflictKey));
+      let added = 0;
+      newConflicts.forEach(c => {
+        const key = conflictKey(c);
+        if (existingKeys.has(key)) return;
+        queue.push(Object.assign({ memberId, memberName, detectedAt: nowIso() }, c));
+        existingKeys.add(key);
+        added++;
+      });
+      if (added) saveConflictQueue(queue);
+      return added;
+    }
+
     async function mergeImportedMembers(normalized) {
+      let totalNewConflicts = 0;
       for (const incoming of normalized) {
         const idx = members.findIndex(x => x.id === incoming.id);
         const isUpdate = idx !== -1;
         const label = isUpdate
-          ? `Update "${incoming.name}" using this file?\n\nThis replaces that member's own records, insurance, etc. with the imported version. Other family members are not affected.`
+          ? `Update "${incoming.name}" using this file?\n\nThis merges that member's records, insurance, etc. field-by-field with the imported version - your own edits since the last sync aren't overwritten. Other family members are not affected.`
           : `"${incoming.name}" doesn't match any current family member.\n\nAdd them as a new member from this file?`;
         if (!confirm(label)) continue;
         const previousMembers = members;
-        const [migrated] = await migrateMemberAttachmentsToIdb([incoming]);
+
+        let finalMember, conflicts = [];
+        if (isUpdate) {
+          // FHSMerge.mergeMembers (merge-engine.js, loaded as its own
+          // namespaced global - see that file's header comment for why)
+          // is pure - it doesn't touch `members` or IndexedDB itself, just
+          // returns the merged result plus whatever conflicts it found.
+          const result = FHSMerge.mergeMembers([members[idx]], [incoming]);
+          finalMember = result.members[0];
+          conflicts = result.conflicts;
+        } else {
+          finalMember = incoming; // nothing local to merge against
+        }
+
+        const [migrated] = await migrateMemberAttachmentsToIdb([finalMember]);
         const nextMembers = [...members];
         if (isUpdate) nextMembers[idx] = migrated; else nextMembers.push(migrated);
         members = nextMembers;
@@ -3763,11 +3841,19 @@
           alert(`Couldn't save the imported data for "${incoming.name}" - storage may be full.`);
           continue;
         }
+        totalNewConflicts += appendConflicts(migrated.id, migrated.name, conflicts);
         currentMemberId = migrated.id;
         currentTab = 'overview';
       }
       renderMemberList();
       renderMain();
+      if (totalNewConflicts > 0) {
+        // Minimal, honest signal until the real conflict-review screen
+        // (build order step 5) exists: nothing was lost - the other side's
+        // version is saved in the queue, your device's version is what's
+        // showing for now, per the conflict-output contract (design 1.5).
+        alert(`Import merged. ${totalNewConflicts} item(s) had edits on both sides for the same thing - your device's version was kept for now, and the other version was saved for review. A conflict review screen is coming in a future update.`);
+      }
     }
 
     async function extractJsonFromZip(file) {

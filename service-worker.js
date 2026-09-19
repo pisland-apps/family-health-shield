@@ -21,12 +21,13 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v37';
+const CACHE_VERSION = 'v38';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
   './',
   './app.js',
+  './merge-engine.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
