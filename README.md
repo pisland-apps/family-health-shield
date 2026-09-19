@@ -16,6 +16,9 @@
 family-health-shield/
 ├── index.html              ← 主应用页面(结构 + 样式)
 ├── app.js                   ← 主应用逻辑(原先内联在 index.html 里,现已拆成外部文件)
+├── merge-engine.js           ← 单成员导入的字段/条目级合并引擎(纯函数,UMD 封装,浏览器/Node 双环境可用),设计详见 MERGE_SYNC_DESIGN.md
+├── merge-engine.test.js      ← merge-engine.js 的 Node 测试(`node merge-engine.test.js` 直接跑,不需要额外装测试框架)
+├── MERGE_SYNC_DESIGN.md      ← 单成员合并同步功能的完整设计文档(语义决定 + 实现细节两部分)
 ├── manifest.json            ← Web App Manifest(可安装为 PWA)
 ├── service-worker.js        ← 离线缓存(App Shell 预缓存 + cache-first)
 ├── _headers                  ← Cloudflare Pages 自定义响应头(CSP frame-ancestors / X-Frame-Options 等,GitHub Pages 不支持,故需换托管平台)
@@ -75,7 +78,7 @@ const CACHE_VERSION = 'v1';
 
 应用逻辑现在是独立的 `app.js` 文件,CSP 用 `script-src 'self'` 直接放行,不再依赖哈希白名单(曾经用过 `sha256-...` 哈希锁定内联 `<script>`,但本地算好的哈希在 push 到 GitHub Pages 后经常和线上文件字节对不上,导致整个 App 白屏——具体原因见 `index.html` 头部的设计说明注释)。
 
-**所以现在改 `app.js` 不需要额外步骤**,和改 `index.html` / `manifest.json` 一样,记得同步更新下面这条的 `CACHE_VERSION`,并且部署时要把 `app.js` 和 `index.html` 一起 push——只推 `index.html` 会导致线上白屏(`index.html` 会去请求一个不存在的 `app.js`)。
+**所以现在改 `app.js` 不需要额外步骤**,和改 `index.html` / `manifest.json` 一样,记得同步更新下面这条的 `CACHE_VERSION`,并且部署时要把 `app.js`、`merge-engine.js` 和 `index.html` 一起 push——只推 `index.html` 会导致线上白屏(`index.html` 会去请求不存在的 `app.js`/`merge-engine.js`)。
 
 `scripts/update_csp_hash.py` 和 `.githooks/pre-commit` 是旧哈希方案留下的维护脚本,现在用不上了,可以删除。
 
@@ -115,3 +118,24 @@ const CACHE_VERSION = 'v1';
 - v27(2026-08-14)锁屏/解锁屏加了大号触屏数字键盘:两个"输入现有密码"的界面(`appLockScreen` 的 `appLockPasscodeInput`、解锁弹窗的 `unlockPasscodeInput`)新增 `.numpad` 数字键盘,方便手机/平板输入。输入框本身加了 `inputmode="none"`,数字键盘按钮只会往 `input.value` 写字符、从不调用 `.focus()`,所以点数字键盘不会弹出系统输入法;因为密码不限制必须是数字(只要求 6 位以上),键盘旁边留了一个 ⌨️ 切换按钮,给密码里带字母/符号的人切回普通输入法。这次改动往 `index.html` 的 `<style>` 块里加了 numpad 的 CSS,按 README 前面"务必阅读"那条提醒跑了 `regen-style-hash.py` 重新生成了哈希并同步贴到了 `index.html` 和 `_headers` 两处。`APP_VERSION`/`APP_VERSION_DATE`(app.js)和 `CACHE_VERSION`(service-worker.js)都已同步改成 v27——上一版数字键盘功能虽然做了,但漏了这一步,导致老用户的浏览器会因为 Service Worker 缓存继续拿到没有数字键盘的旧版本;这一版已修正。
 - v28(2026-09-07)附件(照片/PDF)预览弹窗改版,对齐了另一个姊妹项目(Ledger 记账本)里更成熟的查看器布局:①弹窗从固定 `max-width:720px` 改成 `95vw × 88vh`,尽量用满屏幕;②弹窗背景遮罩从浅色 `rgba(0,0,0,0.4)` 加深到 `rgba(0,0,0,0.85)`,看照片/PDF 时不刺眼;③修复一个实际存在的问题——原来标题、内容、"下载/关闭"按钮是整体一起滚动的,遇到多页 PDF 时按钮会被顶到最下面,得先滚到底才能点"关闭";现在改成标题和按钮固定不动,只有中间的内容区域自己滚动。顺带修了预览区域的排列方式:原来是默认的 `flex` 横向排列且 `overflow:hidden`,多页 PDF 的画布本该竖着一页页排开,结果理论上会被挤成一排还被裁掉看不到——改成 `flex-direction:column` 纵向堆叠、`overflow-y:auto` 允许滚动。这次改动改了 `index.html` 的 `<style>` 块(只涉及 `attachmentViewerModal` 专用的两个哈希类,没碰其他共用样式),已按提醒跑了 `regen-style-hash.py`,新哈希已同步贴进 `index.html` 和 `_headers` 两处。`APP_VERSION`/`APP_VERSION_DATE`(app.js)和 `CACHE_VERSION`(service-worker.js)已同步改成 v28。
 - v29(2026-09-07)保单 Premium Ledger 的"付款方式"下拉菜单新增一项"Credit Card"(信用卡),插在 Auto-Debit 和 Cash 之间。这个字段在代码里只是存成自由文本(`l.method`)展示,没有任何按具体选项分支的图标/逻辑,所以只改了 `index.html` 里的 `<option>` 列表,没碰其他地方。这次改动不涉及 `<style>` 块,不需要重新生成 CSP 哈希。`APP_VERSION`/`APP_VERSION_DATE`(app.js)和 `CACHE_VERSION`(service-worker.js)已同步改成 v29。
+- v32-v39(2026-09-17~18)**单个成员导入不再是整体覆盖,改成字段/条目级别的合并同步**——这是这几版里最大的一次数据模型改动,建议部署前完整看完这一条。
+
+  **要解决的问题**:原来"导出单个成员 → 对方编辑 → 导入回主文件"这条路径,导入时是整个成员对象覆盖,哪怕只想同步对方新增的一条记录,自己这边同期做的任何修改都会被整份替换掉,没有任何合并逻辑,详细设计取舍记录在仓库里新增的 `MERGE_SYNC_DESIGN.md`。
+
+  **新增的数据字段**(每个可同步的实体——成员、健康记录、提醒、保单及其名下的 Ledger/Rider/Coverage/Sum Insured History/Surrender Record/Claim——现在都带):
+  - `version`:逻辑时钟(不是挂钟时间戳),每次本地编辑 +1,合并时取双方较大值
+  - `deletedAt`:软删除标记,删除操作不再从数组里物理移除,只是标记,永久保留(不做自动物理清理)
+  - `schemaVersion`:为以后字段结构迁移预留
+  - 成员额外带 `fieldVersion`(姓名/血型/过敏史等标量字段各自独立计版本,两人分别改了不同字段不会互相覆盖)和 `historyEntries`(病史字段的底层从纯文本升级成带 id/version 的条目数组,但 v1 界面还是单段编辑,行为上感觉不出区别)
+
+  **合并规则**(纯函数实现在新增的 `merge-engine.js` 里,`merge-engine.test.js` 有 67 条测试,含一轮随机模糊测试):数组类数据(记录、保单等)按 id 取并集;同一 id 版本不同,版本高的赢;版本相同但内容不同 → 判定为"冲突",不自动二选一,保留本机版本,把对方版本存进冲突队列等你确认。
+
+  **新增的冲突处理界面**:发现冲突时,页头会出现"⚠️ Conflicts (N)"按钮,点开是一个列表,每条冲突显示"你这边 / 对方那边"的简要对比,可以选"保留我的" / "保留对方的" / (记录类条目可选)"两个都留着"(会复制一份新 id 的记录)。
+
+  **删除行为的变化**:因为改成软删除,一台设备删掉的东西不会再在另一台设备重新导入时"复活"——但也意味着已删除的数据不会真的从存储里清空(只是不再显示),如果对隐私/存储空间比较敏感,导出的备份文件里仍然会带着这些标记为已删除的记录,只是主界面不显示。
+
+  **升级注意事项(强烈建议)**:首次用这个版本打开 App 时,所有现存数据会被一次性打上 `version=1` 的标记(`migrateSyncFields()`,幂等,重复运行不会有副作用)。**如果家里有多台设备,建议升级后先让每台设备互相同步一次(导出/导入跑一轮),再继续各自编辑**——因为升级当天,各设备本地数据都是"从同一个起点开始计版本",如果升级前就存在尚未同步的分歧,这次升级不会自动帮你合并那些旧分歧,只会当作新的冲突处理,越早同步一次,冲突越少。
+
+  **全量导出("Export All")的行为不变**,依然是整份覆盖,这次改动只影响"导出单个成员"这一条路径,详见 `MERGE_SYNC_DESIGN.md` 里的范围说明。
+
+  这次改动新增了两个文件(`merge-engine.js`、`merge-engine.test.js`),`service-worker.js` 的预缓存列表(`APP_SHELL`)已加入 `merge-engine.js`,`index.html` 已在 `app.js` 之前加上对应的 `<script>` 标签。没有改 `<style>` 块,不需要重新生成 CSP 哈希。`APP_VERSION`/`APP_VERSION_DATE`(app.js)和 `CACHE_VERSION`(service-worker.js)已同步改成 v39。
