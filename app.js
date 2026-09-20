@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v40';
-    const APP_VERSION_DATE = '2026-09-19';
+    const APP_VERSION = 'v44';
+    const APP_VERSION_DATE = '2026-09-20';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -2990,9 +2990,17 @@
 
     // Builds the printable "Attachments" section shared by every report type.
     // selectedKeys: a Set of "recordId::attachmentIndex" strings to include (from the preview modal).
+    // Returns { html, pdfJobs } rather than just a string: image attachments
+    // are plain img tags (fine under this page's CSP, img-src allows
+    // data:), but a PDF attachment can't use an embed tag here (object-src
+    // is locked down) - it gets an empty slot div in the html, and the
+    // caller renders each pdfJobs entry into its slot (via
+    // renderPdfIntoContainer) AFTER the html has been written to the DOM,
+    // since that rendering needs real elements to attach canvases to.
     async function buildAttachmentsSectionHtml(records, selectedKeys) {
-      if (!selectedKeys || selectedKeys.size === 0) return '';
+      if (!selectedKeys || selectedKeys.size === 0) return { html: '', pdfJobs: [] };
       let rows = '';
+      const pdfJobs = [];
       for (const r of records) {
         const attachments = r.attachments || [];
         for (let idx = 0; idx < attachments.length; idx++) {
@@ -3001,81 +3009,140 @@
           if (!selectedKeys.has(key)) continue;
           const src = await resolveAttachmentData(att);
           if (!src) continue;
+          const slotId = 'pdfSlot_' + r.id + '_' + idx;
           rows += `
-            <div class="s-7b14e8e7">
-              <div class="s-67c7d753"><strong>${escapeHtml(r.title)}</strong> &middot; ${escapeHtml(r.date)} &middot; ${escapeHtml(att.name)}</div>
+            <div class="pr-att-item">
+              <div class="pr-att-item-label"><strong>${escapeHtml(r.title)}</strong> &middot; ${escapeHtml(r.date)} &middot; ${escapeHtml(att.name)}</div>
               ${att.type === 'image'
-                ? `<img src="${src}" class="s-12e8d0af">`
-                : `<embed src="${src}" type="application/pdf" class="s-00ce6876">`}
+                ? `<img src="${src}" class="pr-att-img">`
+                : `<div id="${slotId}"></div>`}
             </div>`;
+          if (att.type !== 'image') pdfJobs.push({ dataUrl: src, slotId });
         }
       }
-      if (!rows) return '';
-      return `
-        <div class="s-821d65a9">
-          <h2 class="s-43ba3b92">📎 Attachments</h2>
+      if (!rows) return { html: '', pdfJobs: [] };
+      return {
+        html: `
+        <div class="pr-att-block">
+          <h2 class="pr-h2">📎 Attachments</h2>
           ${rows}
-        </div>`;
+        </div>`,
+        pdfJobs
+      };
     }
 
+    // Renders every {dataUrl, slotId} job (from buildAttachmentsSectionHtml
+    // or a report's own single attachment) into its slot element - must run
+    // AFTER the html containing those slot divs has been written to the DOM.
+    async function renderPdfJobs(jobs) {
+      for (const job of jobs) {
+        const slot = document.getElementById(job.slotId);
+        if (slot) await renderPdfIntoContainer(job.dataUrl, slot);
+      }
+    }
+
+    // Clears and returns the shared print container - call at the start of
+    // every in-page print function, so a slow previous cycle's cleanup (see
+    // the afterprint listener) can never bleed into a fresh click.
+    function startPrint() {
+      const printContainer = document.getElementById('printContainer');
+      printContainer.innerHTML = '';
+      return printContainer;
+    }
+
+    // Waits for images to actually finish decoding and for a real paint to
+    // have happened, then prints - see the detailed timing note inside
+    // printEmergency (the first function converted to this pattern) for why
+    // both waits are necessary, not just one or the other.
+    async function finishPrint() {
+      const printContainer = document.getElementById('printContainer');
+      const imgs = Array.from(printContainer.querySelectorAll('img'));
+      await Promise.all(imgs.map(img => (img.decode ? img.decode().catch(() => {}) : Promise.resolve())));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      window.print();
+    }
+    window.addEventListener('afterprint', () => {
+      const pc = document.getElementById('printContainer');
+      if (pc) pc.innerHTML = ''; // don't keep decrypted attachment data sitting in the DOM after printing
+    });
+
     // ========== EMERGENCY CARD ==========
+    // Renders a PDF (as a data: URL) into `container` as one <canvas> per
+    // page - same approach as the attachment viewer (see openAttachment
+    // for the full rationale: consistent cross-platform rendering, and
+    // avoids needing object-src for <embed>, which this page's CSP doesn't
+    // grant). Canvas styling is set via JS property assignment, not
+    // style="..." attributes, since style-src here only allows this page's
+    // one hash-locked <style> block.
+    async function renderPdfIntoContainer(dataUrl, container) {
+      try {
+        const blob = dataUrlToBlob(dataUrl);
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const pdfjsLib = await pdfjsLibPromise;
+        const pdf = await pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise;
+        const containerWidth = container.clientWidth || 360;
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          const unscaledViewport = page.getViewport({ scale: 1 });
+          const scale = Math.max(0.1, (containerWidth - 20) / unscaledViewport.width);
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          canvas.style.display = 'block';
+          canvas.style.maxWidth = '100%';
+          canvas.style.margin = '6px auto';
+          container.appendChild(canvas);
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        }
+      } catch (pdfErr) {
+        const msg = document.createElement('div');
+        msg.textContent = 'Could not render the attached PDF for printing: ' + pdfErr.message;
+        container.appendChild(msg);
+      }
+    }
+
     async function printEmergency(memberId) {
       const m = members.find(x => x.id === memberId);
       if (!m) return;
       const latest = getLatestVitals(m);
       const age = m.birth ? Math.floor((new Date() - new Date(m.birth)) / 365.25 / 24 / 60 / 60 / 1000) : '?';
       const bloodAttData = await resolveAttachmentData(m.bloodTypeAttachment);
+      const isPdfAtt = bloodAttData && (m.bloodTypeAttachment.type !== 'image');
 
-      // Print-report popups (this one and the 8 others like it, e.g. printVaccineRecord,
-      // printMedicationList, insOpenPrintWindow) are deliberately NOT covered by the main
-      // app's tightened style-src/script-src — they're static, ephemeral, same-origin popup
-      // documents (not the encrypted-data app shell), so each gets its own explicit CSP meta
-      // tag below rather than silently relying on the main document's policy. Kept permissive
-      // for exactly what these pages use: inline <style> for the print layout, an inline
-      // onclick/window.onload for the print button/auto-print, and data:/blob: <img>/<embed>
-      // for decrypted attachment previews. connect-src/default-src stay locked to 'none' so
-      // nothing on this page can make a network request even if something were ever injected.
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Emergency Card - ${escapeHtml(m.name)}</title>
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: 0 auto; }
-          .card { border: 3px solid #dc2626; border-radius: 12px; padding: 20px; }
-          h1 { color: #dc2626; text-align: center; margin: 0 0 16px; font-size: 22px; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-          .item { background: #fef2f2; padding: 10px; border-radius: 8px; }
-          .label { font-size: 11px; color: #666; text-transform: uppercase; }
-          .value { font-size: 16px; font-weight: bold; margin-top: 2px; }
-          .full { grid-column: 1 / -1; }
-          .alert { background: #dc2626; color: white; padding: 10px; border-radius: 8px; text-align: center; font-weight: bold; }
-        </style></head><body>
-        <div class="card">
-          <h1>🚨 Emergency Medical Info</h1>
-          <div class="grid">
-            <div class="item"><div class="label">Name</div><div class="value">${escapeHtml(m.name)}</div></div>
-            <div class="item"><div class="label">Age/Gender</div><div class="value">${age}y / ${escapeHtml(m.gender)}</div></div>
-            <div class="item"><div class="label">Blood Type</div><div class="value">${escapeHtml(m.blood)}</div></div>
-            <div class="item"><div class="label">Emergency Contact</div><div class="value">${escapeHtml(m.emergency) || 'None'}</div></div>
-            ${m.allergies !== 'None' ? `<div class="item full alert">⚠️ Allergies: ${escapeHtml(m.allergies)}</div>` : ''}
-            <div class="item full"><div class="label">Medical History</div><div class="value" style="font-size:14px;">${escapeHtml(m.history) || 'None'}</div></div>
-            ${latest.systolic ? `<div class="item"><div class="label">Recent BP</div><div class="value">${latest.systolic}/${latest.diastolic}</div></div>` : ''}
-            ${latest.heartRate ? `<div class="item"><div class="label">Recent HR</div><div class="value">${latest.heartRate} bpm</div></div>` : ''}
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pe-card">
+          <h1 class="pe-title">🚨 Emergency Medical Info</h1>
+          <div class="pe-grid">
+            <div class="pe-item"><div class="pe-label">Name</div><div class="pe-value">${escapeHtml(m.name)}</div></div>
+            <div class="pe-item"><div class="pe-label">Age/Gender</div><div class="pe-value">${age}y / ${escapeHtml(m.gender)}</div></div>
+            <div class="pe-item"><div class="pe-label">Blood Type</div><div class="pe-value">${escapeHtml(m.blood)}</div></div>
+            <div class="pe-item"><div class="pe-label">Emergency Contact</div><div class="pe-value">${escapeHtml(m.emergency) || 'None'}</div></div>
+            ${m.allergies !== 'None' ? `<div class="pe-item pe-full pe-alert">⚠️ Allergies: ${escapeHtml(m.allergies)}</div>` : ''}
+            <div class="pe-item pe-full"><div class="pe-label">Medical History</div><div class="pe-value pe-history-value">${escapeHtml(m.history) || 'None'}</div></div>
+            ${latest.systolic ? `<div class="pe-item"><div class="pe-label">Recent BP</div><div class="pe-value">${latest.systolic}/${latest.diastolic}</div></div>` : ''}
+            ${latest.heartRate ? `<div class="pe-item"><div class="pe-label">Recent HR</div><div class="pe-value">${latest.heartRate} bpm</div></div>` : ''}
           </div>
           ${bloodAttData ? `
-          <div class="item full" style="margin-top:10px;">
-            <div class="label">Blood Type Test Report</div>
-            ${m.bloodTypeAttachment.type === 'image'
-              ? `<img src="${bloodAttData}" style="max-width:100%;border-radius:6px;margin-top:6px;">`
-              : `<embed src="${bloodAttData}" type="application/pdf" style="width:100%;height:300px;margin-top:6px;">`}
+          <div class="pe-item pe-full pe-att-block">
+            <div class="pe-label">Blood Type Test Report</div>
+            ${m.bloodTypeAttachment.type === 'image' ? `<img class="pe-att-img" src="${bloodAttData}">` : `<div id="peBloodPdfSlot"></div>`}
           </div>
           ` : ''}
-          <p style="text-align:center;color:#666;font-size:12px;margin-top:16px;">Generated: ${new Date().toLocaleString()}</p>
+          <p class="pe-footer">Generated: ${new Date().toLocaleString()}</p>
         </div>
-        </body></html>
-      `);
-      printWindow.document.close();
-      setTimeout(() => printWindow.print(), 200);
+      `;
+      // Fully class-based (no style="..." attributes anywhere above): this
+      // page's CSP hash-locks the <style> BLOCK, but a hash alone (without
+      // the separate 'unsafe-hashes' keyword, which this CSP doesn't have)
+      // does NOT cover style="..." attributes - those would be silently
+      // stripped by the browser regardless of the block's hash matching.
+      if (isPdfAtt) {
+        await renderPdfIntoContainer(bloodAttData, document.getElementById('peBloodPdfSlot'));
+      }
+
+      await finishPrint();
     }
 
     // ========== 1. HEALTH SUMMARY REPORT ==========
@@ -3086,7 +3153,8 @@
       const latest = getLatestVitals(m);
       const bmi = calcBmi(m.height, latest.weight);
       const bloodAttData = await resolveAttachmentData(m.bloodTypeAttachment);
-      const attachmentsHtml = await buildAttachmentsSectionHtml(live(m.records), selectedAttachmentKeys);
+      const isPdfAtt = bloodAttData && (m.bloodTypeAttachment.type !== 'image');
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(live(m.records), selectedAttachmentKeys);
 
       const recordsHtml = recordsByDateDesc(m).map(r => `
         <tr>
@@ -3097,68 +3165,46 @@
         </tr>
       `).join('');
 
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Health Summary - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #0d9488; border-bottom: 3px solid #0d9488; padding-bottom: 10px; }
-          h2 { color: #0d9488; margin-top: 30px; font-size: 18px; }
-          .info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }
-          .info-box { background: #f5f7fa; padding: 15px; border-radius: 8px; }
-          .info-box .label { font-size: 11px; color: #666; text-transform: uppercase; }
-          .info-box .value { font-size: 18px; font-weight: bold; margin-top: 5px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-          th { background: #0d9488; color: white; padding: 10px; text-align: left; }
-          td { padding: 10px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #f9fafb; }
-          .alert-box { background: #fee2e2; border-left: 4px solid #ef4444; padding: 15px; margin: 15px 0; border-radius: 4px; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>📋 Health Summary Report</h1>
-        <div class="info-grid">
-          <div class="info-box"><div class="label">Name</div><div class="value">${escapeHtml(m.name)}</div></div>
-          <div class="info-box"><div class="label">Age / Gender</div><div class="value">${age}y / ${escapeHtml(m.gender)}</div></div>
-          <div class="info-box"><div class="label">Blood Type</div><div class="value">${escapeHtml(m.blood)}</div></div>
-          <div class="info-box"><div class="label">Height</div><div class="value">${m.height || '--'} cm</div></div>
-          <div class="info-box"><div class="label">Weight</div><div class="value">${latest.weight || '--'} kg</div></div>
-          <div class="info-box"><div class="label">BMI</div><div class="value">${bmi}</div></div>
-        </div>
-        ${m.allergies !== 'None' ? `<div class="alert-box"><strong>⚠️ Allergies:</strong> ${escapeHtml(m.allergies)}</div>` : ''}
-        <p><strong>Emergency Contact:</strong> ${escapeHtml(m.emergency) || 'None'}</p>
-        <p><strong>Medical History:</strong> ${escapeHtml(m.history) || 'None'}</p>
-        ${m.bloodTypeAttachment && bloodAttData ? `
-        <h2>Blood Type Test Report</h2>
-        ${m.bloodTypeAttachment.type === 'image'
-          ? `<img src="${bloodAttData}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:8px;">`
-          : `<embed src="${bloodAttData}" type="application/pdf" style="width:100%;height:500px;border:1px solid #e5e7eb;border-radius:8px;">`}
-        ` : ''}
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-teal">
+          <h1 class="pr-h1">📋 Health Summary Report</h1>
+          <div class="pr-grid3">
+            <div class="pr-box"><div class="pr-box-label">Name</div><div class="pr-box-value">${escapeHtml(m.name)}</div></div>
+            <div class="pr-box"><div class="pr-box-label">Age / Gender</div><div class="pr-box-value">${age}y / ${escapeHtml(m.gender)}</div></div>
+            <div class="pr-box"><div class="pr-box-label">Blood Type</div><div class="pr-box-value">${escapeHtml(m.blood)}</div></div>
+            <div class="pr-box"><div class="pr-box-label">Height</div><div class="pr-box-value">${m.height || '--'} cm</div></div>
+            <div class="pr-box"><div class="pr-box-label">Weight</div><div class="pr-box-value">${latest.weight || '--'} kg</div></div>
+            <div class="pr-box"><div class="pr-box-label">BMI</div><div class="pr-box-value">${bmi}</div></div>
+          </div>
+          ${m.allergies !== 'None' ? `<div class="pr-alert"><strong>⚠️ Allergies:</strong> ${escapeHtml(m.allergies)}</div>` : ''}
+          <p><strong>Emergency Contact:</strong> ${escapeHtml(m.emergency) || 'None'}</p>
+          <p><strong>Medical History:</strong> ${escapeHtml(m.history) || 'None'}</p>
+          ${m.bloodTypeAttachment && bloodAttData ? `
+          <h2 class="pr-h2">Blood Type Test Report</h2>
+          ${m.bloodTypeAttachment.type === 'image' ? `<img src="${bloodAttData}" class="pr-att-img">` : `<div id="hsBloodPdfSlot"></div>`}
+          ` : ''}
 
-        <h2>Latest Vitals</h2>
-        <div class="info-grid">
-          <div class="info-box"><div class="label">Blood Pressure</div><div class="value">${latest.systolic || '--'}/${latest.diastolic || '--'}</div></div>
-          <div class="info-box"><div class="label">Heart Rate</div><div class="value">${latest.heartRate || '--'} bpm</div></div>
-          <div class="info-box"><div class="label">Temperature</div><div class="value">${latest.temp || '--'} °C</div></div>
-          <div class="info-box"><div class="label">Glucose</div><div class="value">${latest.glucose || '--'} mmol/L</div></div>
-        </div>
+          <h2 class="pr-h2">Latest Vitals</h2>
+          <div class="pr-grid3">
+            <div class="pr-box"><div class="pr-box-label">Blood Pressure</div><div class="pr-box-value">${latest.systolic || '--'}/${latest.diastolic || '--'}</div></div>
+            <div class="pr-box"><div class="pr-box-label">Heart Rate</div><div class="pr-box-value">${latest.heartRate || '--'} bpm</div></div>
+            <div class="pr-box"><div class="pr-box-label">Temperature</div><div class="pr-box-value">${latest.temp || '--'} °C</div></div>
+            <div class="pr-box"><div class="pr-box-label">Glucose</div><div class="pr-box-value">${latest.glucose || '--'} mmol/L</div></div>
+          </div>
 
-        <h2>All Records (${live(m.records).length})</h2>
-        <table>
-          <tr><th>Date</th><th>Type</th><th>Title</th><th>Details</th></tr>
-          ${recordsHtml || '<tr><td colspan="4" style="text-align:center;">No records</td></tr>'}
-        </table>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+          <h2 class="pr-h2">All Records (${live(m.records).length})</h2>
+          <table class="pr-table">
+            <tr><th>Date</th><th>Type</th><th>Title</th><th>Details</th></tr>
+            ${recordsHtml || '<tr><td colspan="4" class="pr-empty">No records</td></tr>'}
+          </table>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
+        </div>
+      `;
+      if (isPdfAtt) pdfJobs.push({ dataUrl: bloodAttData, slotId: 'hsBloodPdfSlot' });
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 2. VACCINATION RECORD CARD ==========
@@ -3178,45 +3224,27 @@
         </tr>
       `).join('');
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(vaccines, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Vaccine Record - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #10b981; border-bottom: 3px solid #10b981; padding-bottom: 10px; }
-          .header-info { display: flex; gap: 30px; margin: 20px 0; padding: 15px; background: #d1fae5; border-radius: 8px; }
-          .header-info div { font-size: 14px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-          th { background: #10b981; color: white; padding: 12px; text-align: left; }
-          td { padding: 12px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #f0fdf4; }
-          .empty { text-align: center; padding: 40px; color: #999; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>💉 Immunization Record</h1>
-        <div class="header-info">
-          <div><strong>Name:</strong> ${escapeHtml(m.name)}</div>
-          <div><strong>Date of Birth:</strong> ${escapeHtml(m.birth) || 'Unknown'}</div>
-          <div><strong>Age:</strong> ${age} years</div>
-          <div><strong>Gender:</strong> ${escapeHtml(m.gender)}</div>
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(vaccines, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-green">
+          <h1 class="pr-h1">💉 Immunization Record</h1>
+          <div class="pr-info-row">
+            <div><strong>Name:</strong> ${escapeHtml(m.name)}</div>
+            <div><strong>Date of Birth:</strong> ${escapeHtml(m.birth) || 'Unknown'}</div>
+            <div><strong>Age:</strong> ${age} years</div>
+            <div><strong>Gender:</strong> ${escapeHtml(m.gender)}</div>
+          </div>
+          <table class="pr-table">
+            <tr><th>#</th><th>Vaccine</th><th>Date</th><th>Details</th><th>Tags</th></tr>
+            ${vaccineRows || '<tr><td colspan="5" class="pr-empty">No vaccination records found</td></tr>'}
+          </table>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-        <table>
-          <tr><th>#</th><th>Vaccine</th><th>Date</th><th>Details</th><th>Tags</th></tr>
-          ${vaccineRows || '<tr><td colspan="5" class="empty">No vaccination records found</td></tr>'}
-        </table>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 3. MEDICATION LIST ==========
@@ -3234,42 +3262,25 @@
         </tr>
       `).join('');
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(meds, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Medication List - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #f59e0b; border-bottom: 3px solid #f59e0b; padding-bottom: 10px; }
-          .patient-info { background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; }
-          table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-          th { background: #f59e0b; color: white; padding: 12px; text-align: left; }
-          td { padding: 12px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #fffbeb; }
-          .warning { background: #fee2e2; border-left: 4px solid #ef4444; padding: 15px; margin: 15px 0; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>💊 Current & Past Medications</h1>
-        <div class="patient-info">
-          <strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Allergies:</strong> ${escapeHtml(m.allergies)} | <strong>Emergency:</strong> ${escapeHtml(m.emergency) || 'None'}
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(meds, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-amber">
+          <h1 class="pr-h1">💊 Current & Past Medications</h1>
+          <div class="pr-info-row">
+            <div><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Allergies:</strong> ${escapeHtml(m.allergies)} | <strong>Emergency:</strong> ${escapeHtml(m.emergency) || 'None'}</div>
+          </div>
+          ${m.allergies !== 'None' ? `<div class="pr-alert"><strong>⚠️ Drug Allergies:</strong> ${escapeHtml(m.allergies)}</div>` : ''}
+          <table class="pr-table">
+            <tr><th>Medication</th><th>Date</th><th>Details / Dosage</th><th>Tags</th></tr>
+            ${medRows || '<tr><td colspan="4" class="pr-empty">No medication records</td></tr>'}
+          </table>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-        ${m.allergies !== 'None' ? `<div class="warning"><strong>⚠️ Drug Allergies:</strong> ${escapeHtml(m.allergies)}</div>` : ''}
-        <table>
-          <tr><th>Medication</th><th>Date</th><th>Details / Dosage</th><th>Tags</th></tr>
-          ${medRows || '<tr><td colspan="4" style="text-align:center;padding:40px;">No medication records</td></tr>'}
-        </table>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 4. LAB RESULTS SUMMARY ==========
@@ -3295,44 +3306,27 @@
         `;
       });
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(labs, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Lab Results - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 900px; margin: 0 auto; color: #333; }
-          h1 { color: #8b5cf6; border-bottom: 3px solid #8b5cf6; padding-bottom: 10px; }
-          .patient-info { background: #ede9fe; padding: 15px; border-radius: 8px; margin: 20px 0; }
-          table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }
-          th { background: #8b5cf6; color: white; padding: 10px; text-align: center; }
-          td { padding: 10px; border-bottom: 2px solid #94a3b8; text-align: center; }
-          tr:nth-child(even) { background: #f5f3ff; }
-          .abnormal { color: #ef4444; font-weight: bold; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>🔬 Lab Results Summary</h1>
-        <div class="patient-info">
-          <strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>DOB:</strong> ${escapeHtml(m.birth) || 'Unknown'} | <strong>Blood Type:</strong> ${escapeHtml(m.blood)}
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(labs, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-wide pr-purple">
+          <h1 class="pr-h1">🔬 Lab Results Summary</h1>
+          <div class="pr-info-row">
+            <div><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>DOB:</strong> ${escapeHtml(m.birth) || 'Unknown'} | <strong>Blood Type:</strong> ${escapeHtml(m.blood)}</div>
+          </div>
+          <table class="pr-table pr-table-center">
+            <tr>
+              <th>Date</th><th>Test</th><th>BP (mmHg)</th><th>HR (bpm)</th>
+              <th>Glucose</th><th>Temp (°C)</th><th>Weight (kg)</th>
+            </tr>
+            ${labRows || '<tr><td colspan="7" class="pr-empty">No lab records with vitals</td></tr>'}
+          </table>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-        <table>
-          <tr>
-            <th>Date</th><th>Test</th><th>BP (mmHg)</th><th>HR (bpm)</th>
-            <th>Glucose</th><th>Temp (°C)</th><th>Weight (kg)</th>
-          </tr>
-          ${labRows || '<tr><td colspan="7" style="text-align:center;padding:40px;">No lab records with vitals</td></tr>'}
-        </table>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 5. BLOOD PRESSURE LOG ==========
@@ -3348,7 +3342,7 @@
       bpRecords.forEach(r => {
         const v = r.vitals;
         const status = v.systolic > 140 || v.diastolic > 90 ? 'High' : v.systolic < 90 || v.diastolic < 60 ? 'Low' : 'Normal';
-        const statusColor = status === 'High' ? '#ef4444' : status === 'Low' ? '#f59e0b' : '#10b981';
+        const statusClass = status === 'High' ? 'pr-status-high' : status === 'Low' ? 'pr-status-low' : 'pr-status-normal';
 
         totalSys += v.systolic;
         totalDia += v.diastolic;
@@ -3360,7 +3354,7 @@
             <td><strong>${v.systolic}/${v.diastolic}</strong></td>
             <td>${v.heartRate || '-'}</td>
             <td>${escapeHtml(r.title)}</td>
-            <td style="color:${statusColor};font-weight:bold;">${status}</td>
+            <td class="${statusClass}">${status}</td>
           </tr>
         `;
       });
@@ -3368,54 +3362,32 @@
       const avgSys = count ? Math.round(totalSys / count) : '--';
       const avgDia = count ? Math.round(totalDia / count) : '--';
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(bpRecords, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>BP Log - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #ef4444; border-bottom: 3px solid #ef4444; padding-bottom: 10px; }
-          .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }
-          .summary-box { background: #fee2e2; padding: 20px; border-radius: 8px; text-align: center; }
-          .summary-box .label { font-size: 12px; color: #666; }
-          .summary-box .value { font-size: 28px; font-weight: bold; color: #ef4444; }
-          .legend { display: flex; gap: 20px; margin: 15px 0; font-size: 13px; }
-          .legend span { display: flex; align-items: center; gap: 5px; }
-          .dot { width: 12px; height: 12px; border-radius: 50%; }
-          table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-          th { background: #ef4444; color: white; padding: 12px; text-align: left; }
-          td { padding: 12px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #fef2f2; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>🩺 Blood Pressure Log</h1>
-        <p><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Records:</strong> ${count}</p>
-        <div class="summary">
-          <div class="summary-box"><div class="label">Average Systolic</div><div class="value">${avgSys}</div></div>
-          <div class="summary-box"><div class="label">Average Diastolic</div><div class="value">${avgDia}</div></div>
-          <div class="summary-box"><div class="label">Total Readings</div><div class="value">${count}</div></div>
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(bpRecords, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-red">
+          <h1 class="pr-h1">🩺 Blood Pressure Log</h1>
+          <p><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Records:</strong> ${count}</p>
+          <div class="pr-grid3">
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Average Systolic</div><div class="pr-box-value-lg">${avgSys}</div></div>
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Average Diastolic</div><div class="pr-box-value-lg">${avgDia}</div></div>
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Total Readings</div><div class="pr-box-value-lg">${count}</div></div>
+          </div>
+          <div class="pr-legend">
+            <span><span class="pr-dot pr-dot-red"></span> High (&gt;140/90)</span>
+            <span><span class="pr-dot pr-dot-green"></span> Normal</span>
+            <span><span class="pr-dot pr-dot-amber"></span> Low (&lt;90/60)</span>
+          </div>
+          <table class="pr-table">
+            <tr><th>Date</th><th>BP (mmHg)</th><th>HR</th><th>Context</th><th>Status</th></tr>
+            ${bpRows || '<tr><td colspan="5" class="pr-empty">No BP records found</td></tr>'}
+          </table>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-        <div class="legend">
-          <span><span class="dot" style="background:#ef4444"></span> High (>140/90)</span>
-          <span><span class="dot" style="background:#10b981"></span> Normal</span>
-          <span><span class="dot" style="background:#f59e0b"></span> Low (<90/60)</span>
-        </div>
-        <table>
-          <tr><th>Date</th><th>BP (mmHg)</th><th>HR</th><th>Context</th><th>Status</th></tr>
-          ${bpRows || '<tr><td colspan="5" style="text-align:center;padding:40px;">No BP records found</td></tr>'}
-        </table>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 6. GROWTH CHART ==========
@@ -3440,47 +3412,28 @@
         `;
       });
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(weightRecords, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Growth Chart - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #3b82f6; border-bottom: 3px solid #3b82f6; padding-bottom: 10px; }
-          .child-info { background: #dbeafe; padding: 20px; border-radius: 8px; margin: 20px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
-          .child-info div { text-align: center; }
-          .child-info .label { font-size: 12px; color: #666; }
-          .child-info .value { font-size: 24px; font-weight: bold; color: #3b82f6; }
-          table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-          th { background: #3b82f6; color: white; padding: 12px; text-align: left; }
-          td { padding: 12px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #eff6ff; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>📏 Growth Chart</h1>
-        <div class="child-info">
-          <div><div class="label">Name</div><div class="value">${escapeHtml(m.name)}</div></div>
-          <div><div class="label">Age</div><div class="value">${age}y</div></div>
-          <div><div class="label">Gender</div><div class="value">${escapeHtml(m.gender)}</div></div>
-          <div><div class="label">Current Height</div><div class="value">${m.height || '--'}</div></div>
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(weightRecords, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-blue">
+          <h1 class="pr-h1">📏 Growth Chart</h1>
+          <div class="pr-grid4">
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Name</div><div class="pr-box-value">${escapeHtml(m.name)}</div></div>
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Age</div><div class="pr-box-value">${age}y</div></div>
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Gender</div><div class="pr-box-value">${escapeHtml(m.gender)}</div></div>
+            <div class="pr-box pr-box-center"><div class="pr-box-label">Current Height</div><div class="pr-box-value">${m.height || '--'}</div></div>
+          </div>
+          <table class="pr-table">
+            <tr><th>Date</th><th>Height (cm)</th><th>Weight (kg)</th><th>BMI</th><th>Notes</th></tr>
+            ${growthRows || '<tr><td colspan="5" class="pr-empty">No growth records with weight</td></tr>'}
+          </table>
+          <p class="pr-note">* Height reflects the member's current recorded height, not a historical measurement per visit. Update height in "Edit Info" as it changes for more accurate BMI trends.</p>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-        <table>
-          <tr><th>Date</th><th>Height (cm)</th><th>Weight (kg)</th><th>BMI</th><th>Notes</th></tr>
-          ${growthRows || '<tr><td colspan="5" style="text-align:center;padding:40px;">No growth records with weight</td></tr>'}
-        </table>
-        <p style="font-size:11px;color:#999;margin-top:8px;">* Height reflects the member's current recorded height, not a historical measurement per visit. Update height in "Edit Info" as it changes for more accurate BMI trends.</p>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== 7. ANNUAL HEALTH REPORT ==========
@@ -3505,68 +3458,44 @@
         <tr><td>${escapeHtml(type)}</td><td>${count}</td></tr>
       `).join('');
 
-      const attachmentsHtml = await buildAttachmentsSectionHtml(yearRecords, selectedAttachmentKeys);
-      const printWindow = window.open('', '_blank');
-      printWindow.document.write(`
-        <html><head><title>Annual Report - ${escapeHtml(m.name)}</title>
-        <!-- explicit per-window CSP: see comment above printEmergency's printWindow.document.write -->
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #333; }
-          h1 { color: #0d9488; border-bottom: 3px solid #0d9488; padding-bottom: 10px; }
-          h2 { color: #0d9488; font-size: 18px; margin-top: 30px; }
-          .year-badge { background: #0d9488; color: white; padding: 5px 15px; border-radius: 20px; font-size: 14px; display: inline-block; margin-bottom: 10px; }
-          .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }
-          .stat-box { background: #f5f7fa; padding: 20px; border-radius: 8px; text-align: center; border-top: 4px solid #0d9488; }
-          .stat-box .number { font-size: 32px; font-weight: bold; color: #0d9488; }
-          .stat-box .label { font-size: 12px; color: #666; margin-top: 5px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-          th { background: #0d9488; color: white; padding: 10px; text-align: left; }
-          td { padding: 10px; border-bottom: 2px solid #94a3b8; }
-          tr:nth-child(even) { background: #f0fdf4; }
-          .goals { background: #ecfdf5; padding: 20px; border-radius: 8px; margin-top: 20px; }
-          .goals h3 { color: #0d9488; margin-bottom: 10px; }
-          .goals ul { margin-left: 20px; }
-          .footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
-          .no-print { text-align: right; margin-bottom: 16px; }
-          .no-print button { background: #0d9488; color: #fff; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
-          .no-print button:hover { opacity: 0.9; }
-          @media print { .no-print { display: none !important; } }
-        </style></head><body>
-        <div class="no-print"><button onclick="window.print()">🖨️ Print This Report</button></div>
-        <h1>📅 Annual Health Report</h1>
-        <span class="year-badge">${year}</span>
-        <p><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Age:</strong> ${age}y | <strong>Gender:</strong> ${escapeHtml(m.gender)}</p>
+      const { html: attachmentsHtml, pdfJobs } = await buildAttachmentsSectionHtml(yearRecords, selectedAttachmentKeys);
+      const printContainer = startPrint();
+      printContainer.innerHTML = `
+        <div class="pr-page pr-teal">
+          <h1 class="pr-h1">📅 Annual Health Report</h1>
+          <span class="pr-badge">${year}</span>
+          <p><strong>Patient:</strong> ${escapeHtml(m.name)} | <strong>Age:</strong> ${age}y | <strong>Gender:</strong> ${escapeHtml(m.gender)}</p>
 
-        <h2>This Year's Activity</h2>
-        <div class="stats">
-          <div class="stat-box"><div class="number">${checkups}</div><div class="label">Checkups</div></div>
-          <div class="stat-box"><div class="number">${vaccines}</div><div class="label">Vaccines</div></div>
-          <div class="stat-box"><div class="number">${illnesses}</div><div class="label">Illnesses</div></div>
-          <div class="stat-box"><div class="number">${medications}</div><div class="label">Medications</div></div>
+          <h2 class="pr-h2">This Year's Activity</h2>
+          <div class="pr-grid4">
+            <div class="pr-box pr-box-center pr-accent"><div class="pr-box-value-lg">${checkups}</div><div class="pr-box-label">Checkups</div></div>
+            <div class="pr-box pr-box-center pr-accent"><div class="pr-box-value-lg">${vaccines}</div><div class="pr-box-label">Vaccines</div></div>
+            <div class="pr-box pr-box-center pr-accent"><div class="pr-box-value-lg">${illnesses}</div><div class="pr-box-label">Illnesses</div></div>
+            <div class="pr-box pr-box-center pr-accent"><div class="pr-box-value-lg">${medications}</div><div class="pr-box-label">Medications</div></div>
+          </div>
+
+          <h2 class="pr-h2">Lifetime Record Breakdown</h2>
+          <table class="pr-table">
+            <tr><th>Record Type</th><th>Total Count</th></tr>
+            ${breakdownRows}
+            <tr class="pr-table-total-row"><td>Total Records</td><td>${live(m.records).length}</td></tr>
+          </table>
+
+          <div class="pr-goals">
+            <h3 class="pr-h3">🎯 Health Goals for Next Year</h3>
+            <ul>
+              <li>Schedule annual physical checkup</li>
+              <li>Keep up with recommended vaccinations</li>
+              <li>Maintain regular health monitoring</li>
+              <li>Update emergency contact information</li>
+            </ul>
+          </div>
+          <div class="pr-footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
+          ${attachmentsHtml}
         </div>
-
-        <h2>Lifetime Record Breakdown</h2>
-        <table>
-          <tr><th>Record Type</th><th>Total Count</th></tr>
-          ${breakdownRows}
-          <tr style="font-weight:bold;background:#ccfbf1;"><td>Total Records</td><td>${live(m.records).length}</td></tr>
-        </table>
-
-        <div class="goals">
-          <h3>🎯 Health Goals for Next Year</h3>
-          <ul>
-            <li>Schedule annual physical checkup</li>
-            <li>Keep up with recommended vaccinations</li>
-            <li>Maintain regular health monitoring</li>
-            <li>Update emergency contact information</li>
-          </ul>
-        </div>
-        <div class="footer">Generated by Family Health & Shield on ${new Date().toLocaleString()}</div>
-        ${attachmentsHtml}
-        </body></html>
-      `);
-      printWindow.document.close();
+      `;
+      await renderPdfJobs(pdfJobs);
+      await finishPrint();
     }
 
     // ========== EXPORT / IMPORT ==========
@@ -5728,32 +5657,10 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('insReportModal').classList.remove('active');
     });
 
-    function insOpenPrintWindow(title, bodyHtml) {
-      const win = window.open('', '_blank');
-      if (!win) { alert('Please allow pop-ups to view/print the report.'); return; }
-      // Same deliberate per-window CSP as printEmergency's printWindow (see comment there).
-      win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(title)}</title>
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; object-src data:; base-uri 'none'; form-action 'none';">
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#1a1a2e; padding:32px; max-width:900px; margin:0 auto; }
-          h1 { font-size:22px; margin-bottom:4px; }
-          h3 { font-size:16px; margin:24px 0 8px; border-bottom:2px solid #0d9488; padding-bottom:4px; }
-          h4 { font-size:13px; margin:14px 0 6px; color:#374151; }
-          .rpt-meta { color:#6b7280; font-size:12px; margin-bottom:16px; }
-          .rpt-note { font-size:12px; color:#374151; background:#f5f7fa; padding:8px 10px; border-radius:6px; margin:8px 0; }
-          .rpt-badge { font-size:10px; background:#fee2e2; color:#ef4444; padding:2px 8px; border-radius:10px; vertical-align:middle; }
-          table { width:100%; border-collapse:collapse; margin-bottom:10px; }
-          .rpt-kv td { padding:6px 8px; font-size:12px; border:1px solid #e5e7eb; }
-          .rpt-kv td:nth-child(1), .rpt-kv td:nth-child(3) { color:#6b7280; width:22%; }
-          .rpt-table th, .rpt-table td { padding:6px 8px; font-size:12px; border:1px solid #e5e7eb; text-align:left; }
-          .rpt-table th { background:#f5f7fa; }
-          .rpt-policy { page-break-inside: avoid; margin-bottom:16px; }
-          .rpt-policy-subtitle { font-size:12px; font-weight:400; color:#6b7280; margin-top:2px; }
-          @media print { body { padding:12px; } }
-        </style></head><body>${bodyHtml}
-        <script>window.onload = () => setTimeout(() => window.print(), 300);<\/script>
-        </body></html>`);
-      win.document.close();
+    async function insOpenPrintWindow(title, bodyHtml) {
+      const printContainer = startPrint();
+      printContainer.innerHTML = `<div class="pir-page">${bodyHtml}</div>`;
+      await finishPrint();
     }
     // ================= END INSURANCE MODULE =================
 

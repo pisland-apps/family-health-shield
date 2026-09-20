@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-wZY2O4EaSixLAY8ppr8nayWnNzpbd+T0pJChX+x4kAk=';
+    style-src 'self' 'sha256-Cap4Zi0OfAOep8zEKlIsZQsuB2rqdCivPtVMX+lmGIk=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -594,6 +594,137 @@
     .s-quotafill { height:100%; border-radius:999px; }
     .s-ledger-payout { font-weight:700; color:var(--success); }
     .s-ledger-expense { font-weight:700; color:var(--text); }
+
+    /* ===== In-app print reports (build order: Emergency Card first, see
+       README changelog) ===== 
+       Deliberately NOT the old window.open('',' _blank')+document.write
+       popup approach the other 8 report functions still use - those write
+       an entirely separate document with its own relaxed per-page CSP
+       (see the comment above printEmergency's old window.open call for
+       why). Printing in-page instead means the report HTML lives under
+       this page's OWN (tighter) CSP, so: no inline style block or
+       style="..." attributes in report markup (style-src only allows this
+       hash-locked block, not 'unsafe-inline') - report elements are
+       styled via the plain classes below instead; and no embed/object tag
+       for PDF preview (object-src 'none' here, unlike the popup reports'
+       object-src data:) - PDF pages render via the same pdf.js-to-canvas
+       approach the attachment viewer already uses (see openAttachment).
+       #printContainer is hidden on screen and only shown for @media print,
+       which also hides everything else so only the report comes out.
+       NOTE FOR FUTURE EDITS: this comment must never contain the literal
+       text "style" wrapped in angle brackets, or "/style" wrapped in
+       angle brackets either - regen-style-hash.py locates this block by
+       searching for those exact substrings, and a comment that happens to
+       contain one throws its boundary detection off, silently producing a
+       hash for the wrong span. Ask if a rewrite needs to reference the
+       tag by name; there are ways to phrase it that do not confuse the
+       script. */
+    #printContainer { display: none; }
+    @media print {
+      body > *:not(#printContainer) { display: none !important; }
+      #printContainer { display: block !important; }
+    }
+    .pe-card { border: 3px solid #dc2626; border-radius: 12px; padding: 20px; max-width: 400px; margin: 0 auto; font-family: Arial, sans-serif; }
+    .pe-title { color: #dc2626; text-align: center; margin: 0 0 16px; font-size: 22px; }
+    .pe-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .pe-item { background: #fef2f2; padding: 10px; border-radius: 8px; }
+    .pe-label { font-size: 11px; color: #666; text-transform: uppercase; }
+    .pe-value { font-size: 16px; font-weight: bold; margin-top: 2px; }
+    .pe-full { grid-column: 1 / -1; }
+    .pe-alert { background: #dc2626; color: white; padding: 10px; border-radius: 8px; text-align: center; font-weight: bold; }
+    .pe-footer { text-align:center; color:#666; font-size:12px; margin-top:16px; }
+    .pe-att-img { max-width:100%; border-radius:6px; margin-top:6px; display:block; }
+    .pe-history-value { font-size:14px; }
+    .pe-att-block { margin-top:10px; }
+
+    /* ===== Shared print-report layout (the other 8 print reports,
+       converted to in-page printing alongside Emergency Card - see the
+       README changelog for the full list). One generic layout plus a
+       small set of theme-color modifier classes, since all these reports
+       share the same title/info-grid/table/footer shape and only differ
+       in accent color and which pieces they use. */
+    .pr-page { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; color: #333; }
+    .pr-page.pr-wide { max-width: 900px; }
+    .pr-h1 { border-bottom: 3px solid currentColor; padding-bottom: 10px; margin-bottom: 10px; }
+    .pr-h2 { font-size: 18px; margin-top: 30px; }
+    .pr-h3 { margin-bottom: 10px; }
+    .pr-grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }
+    .pr-grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }
+    .pr-box { background: #f5f7fa; padding: 15px; border-radius: 8px; text-align: left; }
+    .pr-box-center { text-align: center; }
+    .pr-box-label { font-size: 11px; color: #666; text-transform: uppercase; }
+    .pr-box-value { font-size: 18px; font-weight: bold; margin-top: 5px; }
+    .pr-box-value-lg { font-size: 28px; font-weight: bold; margin-top: 5px; }
+    .pr-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    .pr-table th { padding: 10px; text-align: left; color: #fff; }
+    .pr-table td { padding: 10px; border-bottom: 2px solid #94a3b8; }
+    .pr-table.pr-table-center th, .pr-table.pr-table-center td { text-align: center; }
+    .pr-table tr:nth-child(even) { background: #f9fafb; }
+    .pr-alert { background: #fee2e2; border-left: 4px solid #ef4444; padding: 15px; margin: 15px 0; border-radius: 4px; }
+    .pr-info-row { background: #f5f7fa; padding: 15px; border-radius: 8px; margin: 20px 0; display:flex; gap:30px; flex-wrap:wrap; font-size:14px; }
+    .pr-footer { text-align: center; color: #999; font-size: 12px; margin-top: 40px; }
+    .pr-empty { text-align: center; padding: 40px; color: #999; }
+    .pr-legend { display: flex; gap: 20px; margin: 15px 0; font-size: 13px; }
+    .pr-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .pr-dot { width: 12px; height: 12px; border-radius: 50%; display:inline-block; }
+    .pr-dot-red { background:#ef4444; }
+    .pr-dot-green { background:#10b981; }
+    .pr-dot-amber { background:#f59e0b; }
+    .pr-badge { color: white; padding: 5px 15px; border-radius: 20px; font-size: 14px; display: inline-block; margin-bottom: 10px; }
+    .pr-goals { background: #ecfdf5; padding: 20px; border-radius: 8px; margin-top: 20px; }
+    .pr-goals ul { margin-left: 20px; }
+    .pr-status-high { color:#ef4444; font-weight:bold; }
+    .pr-status-low { color:#f59e0b; font-weight:bold; }
+    .pr-status-normal { color:#10b981; font-weight:bold; }
+    .pr-abnormal { color: #ef4444; font-weight: bold; }
+    .pr-att-img { max-width:100%; border:1px solid #e5e7eb; border-radius:8px; display:block; }
+    .pr-att-block { margin: 15px 0; }
+    .pr-att-item { margin-bottom: 16px; }
+    .pr-att-item-label { font-size: 13px; margin-bottom: 6px; }
+    .pr-note { font-size:11px; color:#999; margin-top:8px; }
+    .pr-accent { border-top: 4px solid #0d9488; }
+    .pr-table-total-row { font-weight:bold; background:#ccfbf1; }
+    .pr-goals h3 { color: #0d9488; }
+
+    .pr-teal .pr-h1, .pr-teal .pr-h2 { color: #0d9488; }
+    .pr-teal .pr-table th { background: #0d9488; }
+    .pr-teal .pr-box-value, .pr-teal .pr-box-value-lg, .pr-teal .pr-badge { color: #0d9488; }
+    .pr-teal .pr-badge { background: #0d9488; color:#fff; }
+    .pr-teal .pr-box.pr-accent { border-top: 4px solid #0d9488; }
+
+    .pr-green .pr-h1 { color: #10b981; }
+    .pr-green .pr-table th { background: #10b981; }
+
+    .pr-amber .pr-h1 { color: #f59e0b; }
+    .pr-amber .pr-table th { background: #f59e0b; }
+
+    .pr-purple .pr-h1 { color: #8b5cf6; }
+    .pr-purple .pr-table th { background: #8b5cf6; }
+
+    .pr-red .pr-h1 { color: #ef4444; }
+    .pr-red .pr-table th { background: #ef4444; }
+    .pr-red .pr-box-value-lg { color: #ef4444; }
+
+    .pr-blue .pr-h1 { color: #3b82f6; }
+    .pr-blue .pr-table th { background: #3b82f6; }
+    .pr-blue .pr-box-value { color: #3b82f6; }
+
+    /* Insurance policy/statement reports (insOpenPrintWindow's old
+       per-window styles, brought in-page the same way). */
+    .pir-page { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#1a1a2e; padding:20px; max-width:900px; margin:0 auto; }
+    .pir-page h1 { font-size:22px; margin-bottom:4px; }
+    .pir-page h3 { font-size:16px; margin:24px 0 8px; border-bottom:2px solid #0d9488; padding-bottom:4px; }
+    .pir-page h4 { font-size:13px; margin:14px 0 6px; color:#374151; }
+    .pir-page .rpt-meta { color:#6b7280; font-size:12px; margin-bottom:16px; }
+    .pir-page .rpt-note { font-size:12px; color:#374151; background:#f5f7fa; padding:8px 10px; border-radius:6px; margin:8px 0; }
+    .pir-page .rpt-badge { font-size:10px; background:#fee2e2; color:#ef4444; padding:2px 8px; border-radius:10px; vertical-align:middle; }
+    .pir-page table { width:100%; border-collapse:collapse; margin-bottom:10px; }
+    .pir-page .rpt-kv td { padding:6px 8px; font-size:12px; border:1px solid #e5e7eb; }
+    .pir-page .rpt-kv td:nth-child(1), .pir-page .rpt-kv td:nth-child(3) { color:#6b7280; width:22%; }
+    .pir-page .rpt-table th, .pir-page .rpt-table td { padding:6px 8px; font-size:12px; border:1px solid #e5e7eb; text-align:left; }
+    .pir-page .rpt-table th { background:#f5f7fa; }
+    .pir-page .rpt-policy { page-break-inside: avoid; margin-bottom:16px; }
+    .pir-page .rpt-policy-subtitle { font-size:12px; font-weight:400; color:#6b7280; margin-top:2px; }
   </style>
 </head>
 <body>
@@ -1375,6 +1506,8 @@
       </div>
     </div>
   </div>
+
+  <div id="printContainer"></div>
 
   <script src="merge-engine.js"></script>
   <script src="app.js"></script>
