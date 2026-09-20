@@ -183,6 +183,25 @@ function freshFieldVersions() {
 // Merges local/remote scalar fields into `winner` (mutated in place).
 // Independent of whatever the member's own top-level `version` decided -
 // see the note in mergeMemberPair for why these two are deliberately split.
+// Value used for the TIE equality check only (never for what actually gets
+// applied/stored) - bloodTypeAttachment needs special handling because an
+// exported copy always carries the photo's full `.data` (embedded for
+// portability), while the live local copy never does (it's stripped once
+// persisted to IndexedDB - see app.js's persistAttachmentsToIdb). Comparing
+// those two shapes directly would call an untouched re-import of the exact
+// same file a "conflict" on every single sync, since one side always has
+// an extra `.data` field the other doesn't. Strip it before comparing,
+// same way the rest of the app treats attachment identity as id-based, not
+// byte-content-based.
+function fieldCompareValue(f, val) {
+  if (f === 'bloodTypeAttachment' && val && typeof val === 'object' && 'data' in val) {
+    const copy = Object.assign({}, val);
+    delete copy.data;
+    return copy;
+  }
+  return val;
+}
+
 function mergeMemberFields(winner, local, remote, conflicts, path) {
   const lfv = (local && local.fieldVersion) || freshFieldVersions();
   const rfv = (remote && remote.fieldVersion) || freshFieldVersions();
@@ -200,7 +219,7 @@ function mergeMemberFields(winner, local, remote, conflicts, path) {
       // tie
       const lVal = local ? local[f] : undefined;
       const rVal = remote ? remote[f] : undefined;
-      if (!deepEqual(lVal, rVal)) {
+      if (!deepEqual(fieldCompareValue(f, lVal), fieldCompareValue(f, rVal))) {
         conflicts.push({
           entityId: winner.id,
           field: f,

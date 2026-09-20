@@ -289,5 +289,34 @@ function deepJSON(x) { return JSON.stringify(x); }
   }
 })();
 
+// ============================================================
+// 11. Regression: re-importing the exact same export must not manufacture
+// a bloodTypeAttachment conflict just because the exported copy carries
+// `.data` and the live local copy doesn't (see fieldCompareValue in
+// merge-engine.js).
+// ============================================================
+(function testBloodTypeAttachmentNoFalseConflict() {
+  const local = [makeMember('m1', {
+    bloodTypeAttachment: { id: 'att1', name: 'report.jpg', type: 'image', thumb: 'data:...thumb', size: 12345 }
+  })];
+  // Simulate a re-import of this exact member: same attachment, but the
+  // exported/incoming copy ALSO carries the raw .data field.
+  const remote = clone(local);
+  remote[0].bloodTypeAttachment.data = 'data:image/jpeg;base64,AAAA....';
+
+  const { members, conflicts } = mergeMembers(clone(local), clone(remote));
+  const bloodConflicts = conflicts.filter(c => c.field === 'bloodTypeAttachment');
+  ok('bloodTypeAttachment: no false conflict on same-file re-import', bloodConflicts.length === 0,
+    `found: ${JSON.stringify(bloodConflicts)}`);
+  ok('bloodTypeAttachment: id preserved', members[0].bloodTypeAttachment.id === 'att1');
+
+  // Sanity: a GENUINE change (different attachment id) must still conflict
+  // when versions are tied.
+  const remote2 = clone(local);
+  remote2[0].bloodTypeAttachment = { id: 'att2', name: 'newer.jpg', type: 'image', thumb: 'data:...thumb2', size: 999 };
+  const r2 = mergeMembers(clone(local), clone(remote2));
+  ok('bloodTypeAttachment: genuine change still conflicts', r2.conflicts.some(c => c.field === 'bloodTypeAttachment'));
+})();
+
 console.log(`\n${pass} passed, ${fail} failed.`);
 process.exit(fail ? 1 : 0);
