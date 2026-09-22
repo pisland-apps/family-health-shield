@@ -35,17 +35,16 @@
           - 这 8 处内嵌的都是内部生成的 UUID（m.id / memberId），不是用户输入，
             所以重构前也没有属性逃逸风险，重构主要是为了让 CSP 能去掉
             'unsafe-inline'。
-          - 文档里剩余的 onclick="window.print()" 和一处
-            <script>window.onload=...</script>，全部在 printWindow.document.write(...)
-            生成的独立弹出窗口文档里，不受本 <meta> CSP 约束（每个 window 有自己
-            的文档/CSP）。2026-08-10 更新：这部分已经做了——9 个打印/报告弹窗
-            （printEmergency、printBPLog、insOpenPrintWindow 等）现在各自在自己
-            写入的 HTML <head> 里带了一份显式的 <meta> CSP（见 app.js 里
-            printEmergency 的 printWindow.document.write(...) 上方注释），不再是
-            "不受约束"，而是每个弹窗都有自己明确写出来、经过审视的策略——仍然
-            允许 style-src/script-src unsafe-inline（打印按钮的 onclick、报告用
-            的内联 <style>），但 default-src/connect-src 锁到 'none'，img-src/
-            object-src 只放开 data:/blob:（给附件预览用）。
+          - 早期版本里有 9 个打印/报告弹窗（printEmergency、printBPLog、
+            insOpenPrintWindow 等）各自通过 window.open('','_blank') +
+            document.write(...) 生成独立文档，带自己的一份显式 <meta> CSP
+            （允许 style-src/script-src unsafe-inline，专为报告用的内联
+            <style> 和打印按钮 onclick）。2026-09-20（v41–v44）更新：这套
+            弹窗架构已经**全部退役**——9 个报告现在统一走同一个 #printContainer
+            in-page 打印路径（见文末"In-app print reports"那段设计说明），
+            不再创建任何独立 window/document，因此也就不再有第二份、更宽松
+            的 CSP 需要维护或审计；本 <meta> CSP 是全站唯一一份，报告内容
+            同样受它约束，不允许任何内联脚本或未加白名单哈希的内联样式。
 
        3. style-src 现在收紧为 'self'（不再保留 'unsafe-inline'）：
           - 2026-08-10 更新：主文档（index.html + app.js 里渲染主界面的部分）
@@ -60,9 +59,10 @@
             这种逐属性赋值即使没有 unsafe-inline 也一直是允许的，本来就是解决
             "数值随渲染变化、没法提前生成 class"这类情况的标准写法（用在了存储
             空间进度条、保单表单的显示/隐藏切换）。
-          - 唯一没有跟着收紧的是上面第 2 点提到的 9 个打印弹窗——它们是完全独立
-            的文档，各自带了自己的 CSP（同样允许 style unsafe-inline），跟主
-            文档这份 CSP 无关，不冲突也不受影响。
+          - 2026-09-20（v41–v44）更新：上面第 2 点提到的"9 个打印弹窗各自带
+            自己一份更宽松 CSP"这个例外已经不存在了——那套弹窗架构已整体退役，
+            9 个报告现在都在本文档的 style-src 之下渲染，同样只能用下面这份
+            预生成的 CSS class，不存在任何内联样式的例外。
           - ⚠️ 重要维护提醒：下面 style-src 里那个 'sha256-...' 是这个文件里
             <style> 块（从 <style> 到 </style> 之间，逐字节，含空白/换行）的
             哈希。这意味着：以后只要动了这个 <style> 块里的任何一条 CSS 规则
@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-Cap4Zi0OfAOep8zEKlIsZQsuB2rqdCivPtVMX+lmGIk=';
+    style-src 'self' 'sha256-jQe6/xwPCcj8bDfDjNUga83fCopqH8mQ8uy5YnQzWlw=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -379,12 +379,6 @@
     .member-item:hover .member-delete { opacity: 1; }
     .member-delete:hover { background: var(--danger-light); color: var(--danger); }
 
-    @media print {
-      .sidebar, .header, .btn { display: none !important; }
-      .main { padding: 0; }
-      .card { box-shadow: none; border: 1px solid #ddd; }
-    }
-
     /* ===== Auto-generated utility classes (CSP hardening, 2026-08-10) =====
        Replaces every inline style="..." attribute in the main app UI (index.html
        + app.js) so style-src can drop 'unsafe-inline'. Each class name is a hash
@@ -393,10 +387,14 @@
        byte-for-byte identical to before. Do not hand-edit class NAMES here (they
        must match the hash of their content) -- edit values, or add new ones, via
        the same generation approach if this file changes again.
-       NOT applied to the print-report popup windows (printEmergency, printBPLog,
-       etc.) -- those are separate documents with their own explicit CSP that
-       still permits inline styles; see the comment above printEmergency's
-       printWindow.document.write() in app.js. */
+       As of v41-v44 (2026-09-20) this also covers the 9 print reports
+       (printEmergency, printBPLog, insOpenPrintWindow, etc.) -- they used
+       to write out separate popup documents with their own more permissive
+       CSP, but that popup architecture has been fully retired, superseded
+       by the shared in-page #printContainer approach below; the reports now
+       render under this same style-src and use only these classes plus the
+       .pr-*/.pe-*/.pir-*/.rpt-* report classes further down, no inline style
+       attributes anywhere. */
 .s-00642396 { position:fixed;right:8px;bottom:6px;z-index:10001;font-size:10px;line-height:1;color:var(--text-secondary);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:3px 7px;opacity:0.75;pointer-events:none;font-family:monospace; }
 .s-00ce6876 { width:100%;height:600px;border:1px solid #e5e7eb;border-radius:6px; }
 .s-0100dc7f { color:var(--danger);font-size:12px;margin-bottom:12px;text-align:center; }
@@ -597,18 +595,19 @@
 
     /* ===== In-app print reports (build order: Emergency Card first, see
        README changelog) ===== 
-       Deliberately NOT the old window.open('',' _blank')+document.write
-       popup approach the other 8 report functions still use - those write
-       an entirely separate document with its own relaxed per-page CSP
-       (see the comment above printEmergency's old window.open call for
-       why). Printing in-page instead means the report HTML lives under
-       this page's OWN (tighter) CSP, so: no inline style block or
-       style="..." attributes in report markup (style-src only allows this
-       hash-locked block, not 'unsafe-inline') - report elements are
-       styled via the plain classes below instead; and no embed/object tag
-       for PDF preview (object-src 'none' here, unlike the popup reports'
-       object-src data:) - PDF pages render via the same pdf.js-to-canvas
-       approach the attachment viewer already uses (see openAttachment).
+       This replaced the old window.open('','_blank')+document.write popup
+       approach that all 9 reports (Emergency Card included) originally
+       used, where each report wrote an entirely separate document with its
+       own relaxed per-page CSP. As of v41-v44 (2026-09-20) that popup
+       architecture is fully retired - all 9 reports print in-page instead,
+       which means the report HTML lives under this page's OWN (tighter)
+       CSP, so: no inline style block or style="..." attributes anywhere in
+       report markup (style-src only allows this hash-locked block, not
+       'unsafe-inline') - report elements are styled via the plain classes
+       below instead; and no embed/object tag for PDF preview (object-src
+       'none' here, unlike the old popups' object-src data:) - PDF pages
+       render via the same pdf.js-to-canvas approach the attachment viewer
+       already uses (see openAttachment).
        #printContainer is hidden on screen and only shown for @media print,
        which also hides everything else so only the report comes out.
        NOTE FOR FUTURE EDITS: this comment must never contain the literal

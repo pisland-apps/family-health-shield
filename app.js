@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v44';
-    const APP_VERSION_DATE = '2026-09-20';
+    const APP_VERSION = 'v45';
+    const APP_VERSION_DATE = '2026-09-22';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -140,14 +140,18 @@
     // Same problem, different field: vitals entered through the UI always
     // pass through parseFloat() (see the vitals form handler), so
     // r.vitals.systolic etc. are guaranteed numeric everywhere they're
-    // rendered - including the 9 print/report popups, which run with
-    // script-src 'unsafe-inline' for their own print button. Imported
-    // vitals previously bypassed that guarantee entirely (passed through
-    // as whatever the JSON contained), which combined with the popups'
-    // relaxed CSP would let a crafted backup achieve real script execution
-    // there, not just inert HTML. sanitizeVitals() re-applies the same
+    // rendered - including the 9 in-page print reports (see the
+    // "In-app print reports" comment in index.html; as of v41-v44 these no
+    // longer run in separate popup windows with a relaxed CSP - they render
+    // under this page's own strict script-src 'self'). Imported vitals
+    // previously bypassed the numeric guarantee entirely (passed through as
+    // whatever the JSON contained), which would let a crafted backup inject
+    // arbitrary HTML into a rendered report or record view wherever a
+    // vitals value is interpolated without escapeHtml() (non-numeric text
+    // masquerading as, say, systolic). sanitizeVitals() re-applies the same
     // parseFloat/isFinite check the UI form uses, so imported vitals are
-    // exactly as trustworthy as hand-entered ones.
+    // exactly as trustworthy as hand-entered ones - this is defense in
+    // depth on top of escapeHtml(), not a substitute for it.
     function sanitizeVitals(v) {
       if (!v || typeof v !== 'object') return undefined;
       const out = {};
