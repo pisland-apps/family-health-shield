@@ -112,7 +112,7 @@
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self';
-    style-src 'self' 'sha256-jQe6/xwPCcj8bDfDjNUga83fCopqH8mQ8uy5YnQzWlw=';
+    style-src 'self' 'sha256-yIKjqGMNIgJg3jrw06Uf+B7CjyRExGDPIKtei2Qm7qU=';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
@@ -393,7 +393,7 @@
        CSP, but that popup architecture has been fully retired, superseded
        by the shared in-page #printContainer approach below; the reports now
        render under this same style-src and use only these classes plus the
-       .pr-*/.pe-*/.pir-*/.rpt-* report classes further down, no inline style
+       .pr-, .pe-, .pir-, .rpt- report classes further down, no inline style
        attributes anywhere. */
 .s-00642396 { position:fixed;right:8px;bottom:6px;z-index:10001;font-size:10px;line-height:1;color:var(--text-secondary);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:3px 7px;opacity:0.75;pointer-events:none;font-family:monospace; }
 .s-00ce6876 { width:100%;height:600px;border:1px solid #e5e7eb;border-radius:6px; }
@@ -557,6 +557,10 @@
        updateStorageMeter(), the insurance coverage form rows, and the insurance
        ledger amount color. */
     .s-hidden { display:none; }
+    /* Conflict Review Modal's width override -- was a leftover raw style="max-width:640px"
+       attribute that survived the original inline-style cleanup and was silently blocked by
+       CSP (no 'unsafe-inline'), so this modal was stuck at the default .modal max-width. */
+    .s-conflict-modal { max-width:640px; }
     /* All 8 passcode fields in this app (unlock screen, security settings, export/import)
        intentionally use type="text" + this CSS mask instead of type="password". They're
        local encryption passcodes, not website login credentials, but Chrome doesn't know
@@ -770,7 +774,7 @@
       <h1>🏥🛡️ Family Health & Shield</h1>
     </div>
     <div class="header-actions">
-      <button class="btn btn-secondary btn-sm" id="btnConflicts" style="display:none;">⚠️ Conflicts (<span id="conflictCount">0</span>)</button>
+      <button class="btn btn-secondary btn-sm s-hidden" id="btnConflicts">⚠️ Conflicts (<span id="conflictCount">0</span>)</button>
       <button class="btn btn-secondary btn-sm" id="btnExport">📥 Export All</button>
       <button class="btn btn-secondary btn-sm" id="btnExportMember">📤 Export Member</button>
       <button class="btn btn-secondary btn-sm" id="btnImport">📥 Import</button>
@@ -1021,7 +1025,7 @@
 
   <!-- Conflict Review Modal (build order step 5) -->
   <div class="modal-overlay" id="conflictModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal s-conflict-modal">
       <div class="modal-header">⚠️ Review Conflicting Edits</div>
       <div class="s-06d0d891">
         These fields or entries were edited on both sides since the last sync. Your device's version is showing for each right now — pick which to keep, or (where offered) keep both as separate entries.
