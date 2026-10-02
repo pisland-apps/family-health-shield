@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v48';
+    const APP_VERSION = 'v49';
     const APP_VERSION_DATE = '2026-10-02';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -1631,9 +1631,13 @@
           ? (CONFLICT_FIELD_LABELS[c.field] || c.field)
           : (CONFLICT_CONTAINER_LABELS[c.path[c.path.length - 2]] || 'Item');
         const containerKey = c.field ? null : c.path[c.path.length - 2];
-        const localSummary = summarizeConflictSide(containerKey, c.local);
-        const remoteSummary = summarizeConflictSide(containerKey, c.remote);
-        const allowBoth = !c.field; // "keep both" only makes sense for array-item entities, not a single scalar field
+        // an entity deleted on one side must say so; its title / date alone would read as a normal edit
+        const side = (o, s) => (o && typeof o === 'object' && o.deletedAt) ? '\u{1F5D1}\u{FE0F} Deleted \u2014 ' + s : s;
+        const localSummary = side(c.local, summarizeConflictSide(containerKey, c.local));
+        const remoteSummary = side(c.remote, summarizeConflictSide(containerKey, c.remote));
+        // "keep both" only makes sense for array-item entities (not a single scalar field), and only when
+        // their side still exists: a deleted copy would be inserted as an invisible duplicate
+        const allowBoth = !c.field && !(c.remote && c.remote.deletedAt);
         return `
           <div class="s-198fb7f4" data-conflict-idx="${i}">
             <div class="s-ea8a0de7">${escapeHtml(c.memberName)} — ${escapeHtml(label)}</div>
@@ -3903,7 +3907,8 @@
       const resolved = resolveConflictEntity(conflict);
       if (!resolved) { removeConflictFromQueue(conflict); return; } // already gone (e.g. deleted since) - just drop it
 
-      let replacedAttId = null; // stored bytes this resolution may leave unreferenced
+      // attachment files in use before this resolution (to find what it frees)
+      const liveBefore = FHSMerge.collectLiveAttachmentIds(members);
 
       if (resolved.kind === 'field') {
         const m = resolved.member;
@@ -3918,7 +3923,6 @@
               if (!(await ensureUnlocked())) return;
               [val] = await persistAttachmentsToIdb([val]);
             }
-            replacedAttId = m.bloodTypeAttachment && m.bloodTypeAttachment.id;
           }
           m[conflict.field] = val;
         }
@@ -3928,6 +3932,11 @@
       } else {
         const { entity, arr, idx, containerKey } = resolved;
         if (choice === 'remote') {
+          // Bringing back something deleted here but edited on the other device: its files were purged
+          // when it was deleted, so restore them from the copy that came with the import first.
+          if (entity.deletedAt && !conflict.remote.deletedAt) {
+            if (!(await restoreAttachmentBytes(conflict.remote, Object.assign({}, entity, { deletedAt: null })))) return;
+          }
           const scalarKeys = CONTAINER_SCALAR_KEYS[containerKey];
           if (scalarKeys) {
             scalarKeys.forEach(k => { entity[k] = conflict.remote[k]; });
@@ -3935,8 +3944,12 @@
             const id = entity.id;
             Object.assign(entity, conflict.remote, { id });
           }
+          // Deleted-or-not is part of "their version" too (it is not one of the scalar keys, so it has to be
+          // copied explicitly): deleted there -> deleted here; deleted here but edited there -> back again.
+          entity.deletedAt = conflict.remote.deletedAt || null;
           bumpVersion(entity);
         } else if (choice === 'both') {
+          if (conflict.remote && conflict.remote.deletedAt) return; // nothing to duplicate (UI doesn't offer this)
           // The duplicate must be fully independent of the original: fresh id for the entity, for every
           // nested entity, and for every attachment, with the attachment bytes copied under the new ids.
           // (v47 and earlier reused the original's ids here, so both copies shared one stored file.)
@@ -3982,7 +3995,22 @@
 
       saveData();
       removeConflictFromQueue(conflict);
-      if (replacedAttId) await purgeUnreferencedAttachmentBytes([replacedAttId]);
+      await purgeUnreferencedAttachmentBytes(liveBefore); // files this choice freed (replaced photo, deleted entity's files)
+    }
+
+    // Puts back stored bytes for attachments of `liveEntity` that are missing locally, taking them from the
+    // raw `.data` carried by `remoteEntity` (the copy that came with the import). Returns false only if the
+    // user declined the unlock prompt.
+    async function restoreAttachmentBytes(remoteEntity, liveEntity) {
+      const wanted = new Set(FHSMerge.collectLiveAttachmentIds(liveEntity));
+      const withData = FHSMerge.collectAttachmentObjects(remoteEntity).filter(a => a.data && wanted.has(a.id));
+      if (!withData.length) return true;
+      if (!(await ensureUnlocked())) return false;
+      for (const a of withData) {
+        const raw = await idbGetRaw(a.id);
+        if (raw === undefined || raw === null) await idbPut(a.id, a.data);
+      }
+      return true;
     }
 
     // Deletes the stored bytes of any candidate attachment id that no live entity references any more.
@@ -4111,7 +4139,7 @@
 
     async function extractJsonFromZip(file) {
       if (typeof JSZip === 'undefined') {
-        throw new Error('ZIP support (JSZip) failed to load - check your connection and try again, or extract the ZIP manually and import the .json file inside.');
+        throw new Error('ZIP support (JSZip) failed to load - reload the page and try again, or extract the ZIP manually and import the .json file inside.');
       }
       const zip = await JSZip.loadAsync(file);
       // Prefer the standard Pack ZIP path, but fall back to any .json in the archive.
@@ -4174,9 +4202,19 @@
           await mergeImportedMembers(normalized);
         } else if (confirm(`Import will replace current ${members.length} members with ${normalized.length} imported member(s). Continue?`)) {
           const previousMembers = members;
+          const liveBefore = FHSMerge.collectLiveAttachmentIds(previousMembers);
           normalized = await migrateMemberAttachmentsToIdb(normalized);
           members = normalized;
-          if (!saveData()) { members = previousMembers; e.target.value = ''; return; }
+          if (!saveData()) {
+            members = previousMembers;
+            // bytes just stored for the imported data that never got committed
+            const stillUsed = new Set(liveBefore);
+            await idbDeleteMany(FHSMerge.collectLiveAttachmentIds(normalized).filter(id => !stillUsed.has(id)));
+            e.target.value = '';
+            return;
+          }
+          // files of the replaced data that the imported data does not use any more
+          await purgeUnreferencedAttachmentBytes(liveBefore);
           currentMemberId = null;
           currentTab = 'overview';
           renderMemberList();

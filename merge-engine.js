@@ -431,6 +431,29 @@ function collectLiveAttachmentIds(value) {
   return Array.from(ids);
 }
 
+// Every attachment object found anywhere inside `value`, tombstoned or not
+// (under an `attachments` array or a `bloodTypeAttachment` field). The
+// caller filters; this is just the finder (used to get at an attachment's
+// raw `.data` when bringing a deleted entity back).
+function collectAttachmentObjects(value) {
+  const found = [];
+  (function walk(node) {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== 'object') return;
+    Object.keys(node).forEach(k => {
+      const v = node[k];
+      if (k === 'attachments' && Array.isArray(v)) {
+        v.forEach(x => { if (x && typeof x === 'object') found.push(x); });
+      } else if (k === 'bloodTypeAttachment' && v && typeof v === 'object') {
+        found.push(v);
+      } else {
+        walk(v);
+      }
+    });
+  })(value);
+  return found;
+}
+
 // ids that were in use before but are not any more (what an operation
 // "killed"). Differential on purpose: it never proposes bytes the
 // operation did not touch.
@@ -454,7 +477,7 @@ return {
   freshFieldVersions,
   POLICY_SCALAR_KEYS, RECORD_SCALAR_KEYS, REMINDER_SCALAR_KEYS,
   LEDGER_SCALAR_KEYS, COVERAGE_SCALAR_KEYS, SURRENDER_SCALAR_KEYS, CLAIM_SCALAR_KEYS,
-  cloneWithFreshIds, collectLiveAttachmentIds, orphanedAttachmentIds
+  cloneWithFreshIds, collectLiveAttachmentIds, collectAttachmentObjects, orphanedAttachmentIds
 };
 
 }); // end UMD factory

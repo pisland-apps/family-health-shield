@@ -4,7 +4,7 @@
 
 const {
   mergeMembers, mergeSyncArray, mergeAttachmentArray, freshFieldVersions,
-  cloneWithFreshIds, collectLiveAttachmentIds, orphanedAttachmentIds
+  cloneWithFreshIds, collectLiveAttachmentIds, collectAttachmentObjects, orphanedAttachmentIds
 } = require('./merge-engine.js');
 
 let pass = 0, fail = 0;
@@ -414,6 +414,22 @@ function att(id, extra) { return Object.assign({ id, name: id + '.jpg', type: 'i
   // idempotent: re-merging the same remote kills nothing more
   const again = mergeMembers(clone(merged), clone([remote])).members;
   ok('lifecycle: second import of same file orphans nothing', orphanedAttachmentIds(after, collectLiveAttachmentIds(again)).length === 0);
+})();
+
+
+// ============================================================
+// 13. v49: collectAttachmentObjects (used to restore a deleted entity's files)
+// ============================================================
+(function testCollectAttachmentObjects() {
+  const pol = makePolicy('p1', {
+    attachments: [att('a1', { data: 'D1' }), att('a2', { deletedAt: '2026-02-01T00:00:00.000Z' })],
+    ledger: [Object.assign({ id: 'l1', attachments: [att('a3', { data: 'D3' })] }, freshMeta())]
+  });
+  const found = collectAttachmentObjects(pol).map(a => a.id).sort();
+  ok('collectAttachmentObjects: finds nested + tombstoned ones too', found.join() === 'a1,a2,a3', found.join());
+  ok('collectAttachmentObjects: exposes raw .data', collectAttachmentObjects(pol).find(a => a.id === 'a3').data === 'D3');
+  ok('collectAttachmentObjects: blood-type photo found', collectAttachmentObjects({ bloodTypeAttachment: att('b1') })[0].id === 'b1');
+  ok('collectAttachmentObjects: empty for plain values', collectAttachmentObjects({ title: 'x', tags: [] }).length === 0);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed.`);
