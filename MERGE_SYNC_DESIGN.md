@@ -5,6 +5,12 @@ separate on purpose: **Semantics** is for whoever (including future-you) needs
 to understand *why* the system behaves a certain way. **Mechanics** is for
 whoever is about to write or modify the code.
 
+> **Status (v49, 2026-10-02):** implemented in v32 – v39 and amended through
+> v49. The original design text is kept as written; later findings are added
+> as marked notes ("**Update vNN**") next to the section they change, and
+> collected in the *Amendments since the first implementation* table at the
+> end. Where an older paragraph and an update disagree, the update wins.
+
 ---
 
 ## Part 1 — Semantics (read this before touching behavior)
@@ -111,6 +117,15 @@ Two lifecycle rules that don't exist for top-level arrays:
   — `sanitizeIdsDeep` already does deep-id remapping and should be reused,
   but confirm it performs a true deep clone, not a shallow one, before
   relying on it here.
+  **Update v48 — this assumption was wrong.** `sanitizeIdsDeep` only
+  replaces ids that fail the safe-id pattern; a valid id survives it. A
+  "keep both" copy built on it kept the original's entity id (two entries
+  with one id in one array) and the original's attachment ids (two entities
+  sharing one set of stored files). Keep Both now uses
+  `FHSMerge.cloneWithFreshIds` (2.9), which gives **every** id in the copy a
+  new one: the entity, every nested entity, every attachment. Ids that
+  point *outside* the copied entity (a claim's `policyId` / `coverageId`)
+  are references, not ids, and are kept.
 - **Child edits never bump a parent's version.** A ledger row's version
   tracks only that ledger row. Editing a ledger row does not touch its
   parent policy's version. If it did, independent edits to different
@@ -155,6 +170,29 @@ isn't "fixed" as a bug later.
 to the same record, both survive the merge as separate attachments. Mild
 UI redundancy, no data loss — not worth building dedup for.
 
+**Update v40 — the blood-type photo is the exception to "id + tombstone".**
+`bloodTypeAttachment` is a single object, not an array, so it is a member
+**scalar field** (listed in `MEMBER_SCALAR_FIELDS`) with its own
+`fieldVersion`. Replacing or clearing it bumps that entry; the higher
+version wins on merge, a tie queues a field conflict. It has no tombstone
+because it does not need one: "removed" is just the field being `null` at a
+higher version. For the equality check the raw `.data` is stripped from both
+sides (`fieldCompareValue`), because an exported copy carries `.data` and the
+live local copy does not; without that, re-importing the same file raised a
+false conflict.
+
+**Update v48/v49 — stored bytes are local, and their lifecycle is managed.**
+The attachment *metadata* syncs; the *bytes* (IndexedDB, encrypted when
+encryption is on) never do — they travel inside export files as `.data` and
+are re-stored on import. That makes "when may a local file be deleted?" a
+separate question from "which attachment objects exist?" The rule (2.9): a
+file is in use as long as at least one attachment object that is not
+tombstoned, inside an entity that is not tombstoned, points at its id. After
+any operation that can change that (merge import, conflict resolution,
+whole-replace import) the files the operation freed are deleted, after the
+change has been saved, and only those (a differential, never a global
+sweep).
+
 ### 1.10 `history` / `notes` (free-text fields)
 
 Modeled from day one as an **append-only array of `{id, version, text,
@@ -186,6 +224,35 @@ and (b) the final data *once every queued conflict has actually been
 resolved*, because a resolution is just a normal version-bumping edit that
 flows through the same, already-proven-commutative merge path.
 
+### 1.12 Delete vs edit (added v49)
+
+One device deletes an entity while the other edits it, both landing on the
+same `version`: that is a tie with different content, so it is queued like
+any other conflict (1.2) — nothing is auto-resolved, including in favour of
+the delete.
+
+**What "their version" means must include "deleted".** `deletedAt` is not
+one of the compared scalar keys (it is sync metadata), so the conflict
+entry's remote side may be a tombstone that otherwise looks like an ordinary
+edit. Rules:
+
+- The conflict screen labels a deleted side "Deleted — …".
+- **Keep Mine** — unchanged: settle the tie by bumping the version.
+- **Keep Theirs** — adopts the other side's deleted state together with its
+  fields. Deleted there → deleted here (and its stored files are freed).
+  Deleted here, edited there → the entity comes back, and its files are put
+  back into IndexedDB from the raw `.data` that came with the import.
+  (v48 and earlier copied only the scalar fields, so a "keep theirs" on a
+  deletion did not delete and on an edit did not restore.)
+- **Keep Both** is not offered when their side is the deleted one: a copy of
+  a tombstone would be an invisible duplicate. When *this* side is the
+  deleted one and theirs is live, Keep Both is allowed: it restores their
+  edit as a new entity and leaves the local deletion in place.
+
+Known limit: restoring a deleted entity can only bring back files whose raw
+`.data` is in the import. An attachment that arrived without `.data` (its
+bytes never left the other device's browser) is restored as metadata only.
+
 ---
 
 ## Part 2 — Mechanics
@@ -212,7 +279,10 @@ schemaVersion int — for future field-shape migrations
 fieldVersion: { name: 1, nameZh: 1, birth: 1, blood: 1, height: 1,
                 allergies: 1, emergency: 1, gender: 1, ... }
 ```
-One entry per top-level scalar field. **Editing a field bumps only that
+One entry per top-level scalar field (the list the code uses is
+`MEMBER_SCALAR_FIELDS`: `name`, `nameZh`, `nameZhAvatarIdx`, `gender`,
+`birth`, `blood`, `height`, `allergies`, `emergency`, and — since v40 —
+`bloodTypeAttachment`). **Editing a field bumps only that
 field's entry.** Add a lint/test that diffs which fields actually changed
 after a mutation and asserts only those `fieldVersion` entries moved — a
 setter that bumps everything collapses per-field tracking back down to
@@ -281,9 +351,10 @@ already handles: whatever persists the real queue must dedupe by that key
 when appending a merge's conflicts, not append raw. `mergeMembers` itself
 is correct as tested; this is a requirement on its caller (step 4).
 
-Test suite, as actually implemented in `merge-engine.test.js` (all 67
-assertions passing, including a 25-iteration seeded fuzz pass beyond the
-10 named cases below):
+Test suite, as actually implemented in `merge-engine.test.js` (**94**
+assertions passing as of v49, including a 25-iteration seeded fuzz pass beyond
+the 10 named cases below; v40 added the blood-type no-false-conflict cases,
+v48/v49 added the attachment-lifecycle cases listed in 2.9):
 
 1. **Idempotence** — merging the same remote file twice produces the same
    result as merging it once.
@@ -318,6 +389,12 @@ entry points (form open, inline edit) must check `deletedAt` and refuse —
 otherwise a user can edit their own tombstoned entity and create a
 self-inflicted conflict.
 
+**Update v48 — stored files.** A direct delete (record, member, ...) writes
+the tombstone, saves, and deletes the entity's stored files right away; the
+tombstone keeps only metadata. Deletions that arrive through a merge or a
+conflict resolution free their files through the same reference-counted
+purge (2.9).
+
 ### 2.6 Import flow changes
 
 `normalizeImportedMembers` gains: missing `version` → treat as `1`; missing
@@ -325,6 +402,14 @@ self-inflicted conflict.
 rewritten to call the pure `merge()` function, apply the result, persist any
 new conflict-queue entries, and only then trigger the existing
 `migrateMemberAttachmentsToIdb` / `saveData` path.
+
+**Update v48/v49 — file cleanup around the import.** `mergeImportedMembers`
+records which attachment ids the member was using before the merge; after a
+**successful** `saveData()` it deletes those that no member uses any more
+(`purgeUnreferencedAttachmentBytes`). If `saveData()` fails, `members` is
+restored and the bytes that `migrateMemberAttachmentsToIdb` had just stored
+for data that was never committed are deleted. The whole-replace import
+("Export All") does the same before/after comparison across all members.
 
 ### 2.7 Conflict queue UI (v1) — implemented in build order step 5
 
@@ -358,8 +443,7 @@ disputed *scalar* fields (the same `scalarKeys` lists `merge-engine.js`
 itself exports — reused directly from `FHSMerge.RECORD_SCALAR_KEYS` etc.
 so the two can't drift apart), leaving the live entity's already-merged
 children untouched. Leaf types with no nested children (riders,
-sumInsuredHistory, historyEntries, claims minus... actually claims has no
-children either) get a safe full-object apply.
+sumInsuredHistory, historyEntries, claims) get a safe full-object apply.
 
 **Resolution always bumps version, even "Keep Mine"/no content change:**
 per 1.4 a resolution is a normal edit, and the whole point of resolving is
@@ -369,6 +453,27 @@ doesn't move either, the next merge against a stale copy would just
 re-detect the identical tie. So every resolution path — even one that
 doesn't touch content — calls `bumpVersion()` on the entity (or bumps the
 specific `fieldVersion[f]` entry for a field conflict) to settle it.
+
+**Update v48/v49 — what each choice does now.**
+
+- *Keep Both* builds the copy with `FHSMerge.cloneWithFreshIds` (fresh id for
+  the entity, all nested entities, all attachments), writes the attachment
+  bytes under the new ids first (from the queued `.data`, else copied from the
+  local copy under the old id), then inserts the copy and settles the
+  original. If the save fails the copy is removed again and the new bytes
+  deleted. Unlock is requested first when encryption is on; declining it
+  changes nothing and leaves the conflict queued. Not offered when the other
+  side is deleted (1.12).
+- *Keep Theirs* on a field conflict for `bloodTypeAttachment`: the queued
+  remote object still carries the export's raw `.data` and an id from another
+  browser, so it is first stored through `persistAttachmentsToIdb` (new local
+  id, bytes in IndexedDB, no inline `.data` in `localStorage`); the replaced
+  photo's bytes are freed after the save.
+- *Keep Theirs* on an array-item conflict also adopts the deleted state (1.12).
+- After every choice, the files the choice freed are deleted (reference
+  counted, after the save).
+- `resolveConflict` is asynchronous and ignores a second click while one
+  resolution is still running, so a double-click cannot create two copies.
 
 The queue itself lives in its own `localStorage` key
 (`family_health_tracker_v3_conflicts`), separate from `STORAGE_KEY` — it
@@ -391,6 +496,79 @@ immediately after upgrading, before making further edits, to minimize the
 number of conflicts generated by stale offline data meeting the new
 version scheme for the first time.
 
+### 2.9 Attachment byte lifecycle (added v48/v49)
+
+Pure helpers in `merge-engine.js` (no DOM, no IndexedDB, no randomness — ids
+come from the caller), exported on `FHSMerge`:
+
+| Function | What it decides |
+| --- | --- |
+| `cloneWithFreshIds(value, genId)` | Deep clone with a new id on every `id`; returns `{ clone, attachments: [{oldId, newId, att}] }` so the caller can copy bytes. `genId('att' \| 'ent')`. |
+| `collectLiveAttachmentIds(value)` | Ids of attachments in use anywhere inside `value`: neither the attachment nor any containing entity has `deletedAt`; also covers `bloodTypeAttachment`. One id used in several places is listed once. |
+| `collectAttachmentObjects(value)` | Every attachment object (tombstoned or not) inside `value`, including raw `.data`; used to restore a deleted entity's files. |
+| `orphanedAttachmentIds(before, after)` | `before − after`: what an operation freed. |
+
+`app.js` does the actual byte work:
+
+- `purgeUnreferencedAttachmentBytes(candidateIds)` — deletes the candidates
+  that `collectLiveAttachmentIds(members)` (all members) does not contain.
+- `restoreAttachmentBytes(remoteEntity, liveEntity)` — puts back missing
+  bytes for a restored entity from the import's `.data`.
+- Callers: `mergeImportedMembers` (candidates = this member's ids from before
+  the merge), `resolveConflict` (candidates = all ids in use before the
+  choice), whole-replace import (candidates = all ids before).
+
+**Design decisions, with the reasoning, so they are not "improved" later:**
+
+1. **Reference counted, not "delete what the operation removed".** Two
+   entities can legitimately point at one stored file (older data, or any
+   future bug), so deleting by difference alone could remove a file that is
+   still in use. Counting live references makes that impossible.
+2. **Differential, not a global sweep.** Only ids the operation itself could
+   have freed are candidates, so a file the operation never touched (for
+   example one being added in an open form) is never proposed.
+3. **After a successful save, never before.** There is no undo for a merge;
+   the only revert is restoring the previous `members` when `saveData()`
+   fails. Deleting only after the save means that revert never leaves a
+   hole.
+4. **No delayed ("trash then 7 days") deletion.** With 1 and 3 in place it
+   would only keep orphans longer.
+5. **Tombstones count as "not in use".** They stay in the data forever for
+   sync (1.8), but their bytes are not needed; direct deletes already worked
+   this way.
+
+**Not covered:** no periodic full-database orphan scan (cleanup runs only on
+the merge, conflict-resolution and whole-replace paths); if a save fails
+right after a restore of a deleted entity's files, those files can stay as
+orphans (storage only); `historyEntries` is still shadow data — the plain
+`history` text is what screens and reports read — until multi-editor notes
+become real.
+
+**Tests (merge-engine.test.js):** a Keep Both clone shares no id with the
+original; the old/new attachment id mapping; live-id collection (tombstoned
+attachment, tombstoned record, blood-type photo, ledger / surrender
+attachments, a shared id counted once); a real `mergeMembers` run whose
+orphan set is exactly what the merge killed and keeps a shared file while one
+referencing record is still live; a second import of the same file orphans
+nothing; `collectAttachmentObjects`. The browser-only paths (`resolveConflict`,
+the import flow, the screen) are exercised with a Chromium script against the
+real `app.js`, not by the Node tests: merge cleanup, Keep Both (record and
+policy with nested ledger / attachments), Keep Theirs (blood-type photo,
+policy), delete-vs-edit in both directions with and without photos, a
+conflict whose entity is deleted afterwards, double-click, repeat import,
+whole-replace cleanup.
+
+---
+
+## Amendments since the first implementation
+
+| Version | Change | Section |
+| --- | --- | --- |
+| v32 – v39 | Data layer, tombstones, `mergeMembers`, import wiring, conflict screen | build order 1 – 6 |
+| v40 | `bloodTypeAttachment` compared without `.data`; documented as a scalar field | 1.9 |
+| v48 | Keep Both makes an independent copy (`cloneWithFreshIds`); merge and Keep Theirs on the blood-type photo free replaced bytes (reference counted, after save) | 1.7, 1.9, 2.6, 2.7, 2.9 |
+| v49 | Delete-vs-edit: Keep Theirs adopts deleted state, deleted side labelled, no Keep Both on a deleted side; whole-replace import frees replaced files; `collectAttachmentObjects` | 1.12, 2.6, 2.7, 2.9 |
+
 ---
 
 ## Build order
@@ -404,6 +582,10 @@ version scheme for the first time.
 5. Conflict queue UI (simple list per 2.7).
 6. Migration step (2.8) + README/release note update.
 
+**Status:** steps 1 – 6 done (v32 – v39); later amendments in the table
+above. The v40 – v49 findings came from testing, not from the original plan.
+
 Existing full-family-backup import (`exportType: 'all'`, whole-array
-replace) is untouched by any of this — this design only changes the
-single-member merge path.
+replace) is still a whole replace and does no merging — this design only
+changes the single-member merge path. Since v49 it does clean up the stored
+files of the data it replaces (2.6, 2.9).
