@@ -370,6 +370,75 @@ function mergeMembers(localMembers, remoteMembers) {
   return { members, conflicts };
 }
 
+// ---------- attachment lifecycle helpers (v48) ----------
+// Pure, like everything else in this file: no DOM, no IndexedDB, no
+// randomness (ids come from the caller's genId). app.js does the actual
+// byte copying / deleting; these only decide WHAT.
+
+// Deep-clones `value` and gives EVERY `id` in the clone a fresh one:
+// the entity itself, its nested entities (coverages, ledger rows, ...), and
+// its attachments. Returns { clone, attachments } where `attachments` lists
+// { oldId, newId, att } for each attachment object in the clone, so the
+// caller can copy the stored bytes from oldId to newId.
+// Why not app.js's sanitizeIdsDeep: that only replaces ids that fail the
+// safe-id pattern, so a valid id survives the clone and the "duplicate"
+// ends up with the original's entity id and the original's attachment ids
+// (two entities sharing one set of stored bytes).
+// genId(kind) is called with 'att' for attachments, 'ent' for everything else.
+function cloneWithFreshIds(value, genId) {
+  const clone = (typeof structuredClone === 'function')
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+  const attachments = [];
+  (function walk(node, isAtt) {
+    if (Array.isArray(node)) { node.forEach(n => walk(n, isAtt)); return; }
+    if (!node || typeof node !== 'object') return;
+    if ('id' in node) {
+      const oldId = node.id;
+      node.id = genId(isAtt ? 'att' : 'ent');
+      if (isAtt) attachments.push({ oldId, newId: node.id, att: node });
+    }
+    Object.keys(node).forEach(k => walk(node[k], k === 'attachments' || k === 'bloodTypeAttachment'));
+  })(clone, false);
+  return { clone, attachments };
+}
+
+// Ids of every attachment that is still in use anywhere inside `value`
+// (a member, a members array, ...). An attachment counts as in use when
+// neither it nor any entity containing it carries a `deletedAt`
+// tombstone. Tombstoned things keep their metadata for sync, but their
+// stored bytes are no longer needed. Reference counting by construction:
+// the same id found in several live places is simply one entry.
+function collectLiveAttachmentIds(value) {
+  const ids = new Set();
+  (function walk(node) {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== 'object') return;
+    if (node.deletedAt) return;
+    Object.keys(node).forEach(k => {
+      const v = node[k];
+      if (k === 'attachments' && Array.isArray(v)) {
+        v.forEach(a => {
+          if (a && typeof a === 'object' && !a.deletedAt && typeof a.id === 'string') ids.add(a.id);
+        });
+      } else if (k === 'bloodTypeAttachment' && v && typeof v === 'object') {
+        if (!v.deletedAt && typeof v.id === 'string') ids.add(v.id);
+      } else {
+        walk(v);
+      }
+    });
+  })(value);
+  return Array.from(ids);
+}
+
+// ids that were in use before but are not any more (what an operation
+// "killed"). Differential on purpose: it never proposes bytes the
+// operation did not touch.
+function orphanedAttachmentIds(beforeIds, afterIds) {
+  const after = new Set(afterIds);
+  return beforeIds.filter(id => !after.has(id));
+}
+
 // ---------- what the factory exposes as FHSMerge / module.exports ----------
 return {
   mergeMembers,
@@ -384,7 +453,8 @@ return {
   MEMBER_SCALAR_FIELDS,
   freshFieldVersions,
   POLICY_SCALAR_KEYS, RECORD_SCALAR_KEYS, REMINDER_SCALAR_KEYS,
-  LEDGER_SCALAR_KEYS, COVERAGE_SCALAR_KEYS, SURRENDER_SCALAR_KEYS, CLAIM_SCALAR_KEYS
+  LEDGER_SCALAR_KEYS, COVERAGE_SCALAR_KEYS, SURRENDER_SCALAR_KEYS, CLAIM_SCALAR_KEYS,
+  cloneWithFreshIds, collectLiveAttachmentIds, orphanedAttachmentIds
 };
 
 }); // end UMD factory

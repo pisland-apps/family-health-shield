@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v47';
-    const APP_VERSION_DATE = '2026-09-23';
+    const APP_VERSION = 'v48';
+    const APP_VERSION_DATE = '2026-10-02';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -183,20 +183,9 @@
       return value;
     }
 
-    // Deep-clones a value (structuredClone where available, JSON round-trip
-    // fallback) and THEN runs sanitizeIdsDeep on the clone. Deliberately
-    // separate from sanitizeIdsDeep itself: that function mutates its input
-    // in place and returns the same reference, which is fine for its one
-    // existing caller (a disposable just-parsed import blob) but wrong for
-    // "keep both" merge-conflict resolutions, which need an INDEPENDENT
-    // copy with new ids - reusing sanitizeIdsDeep directly there would
-    // remap the ORIGINAL entity's ids instead of producing a duplicate.
-    function deepCloneAndRemapIds(value) {
-      const clone = (typeof structuredClone === 'function')
-        ? structuredClone(value)
-        : JSON.parse(JSON.stringify(value));
-      return sanitizeIdsDeep(clone);
-    }
+    // (v48) Keep Both no longer uses a sanitize-based clone: sanitizeIdsDeep only replaces ids that FAIL the
+    // safe-id pattern, so a clone made with it kept every valid id (entity + attachments). Keep Both now uses
+    // FHSMerge.cloneWithFreshIds, which gives every id in the copy a new one.
 
     // ========== SYNC METADATA (field/array-level merge support) ==========
     // See MERGE_SYNC_DESIGN.md for the full semantics. Summary: `version` is
@@ -1660,10 +1649,10 @@
       }).join('');
 
       body.querySelectorAll('[data-conflict-choice]').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', async () => {
           const idx = parseInt(el.dataset.conflictIdx);
           const conflict = active[idx];
-          resolveConflict(conflict, el.dataset.conflictChoice);
+          await resolveConflict(conflict, el.dataset.conflictChoice);
           renderConflictModal();
           renderMain(); // the resolved field/entity may be visible on the current tab
         });
@@ -3900,15 +3889,39 @@
     // 'remote' - apply remote's disputed fields (only those, for container
     //            types - see CONTAINER_SCALAR_KEYS above), then bump.
     // 'both'   - (array-item conflicts only) duplicate remote's full entity
-    //            under a fresh id via deepCloneAndRemapIds, insert next to
+    //            under fresh ids (entity, nested entities, attachments - FHSMerge.cloneWithFreshIds), insert next to
     //            the original, and still bump the original to settle it.
-    function resolveConflict(conflict, choice) {
+    let resolvingConflict = false;
+    async function resolveConflict(conflict, choice) {
+      if (resolvingConflict) return; // ignore a second click while bytes are still being copied
+      resolvingConflict = true;
+      try { await resolveConflictInner(conflict, choice); }
+      finally { resolvingConflict = false; }
+    }
+
+    async function resolveConflictInner(conflict, choice) {
       const resolved = resolveConflictEntity(conflict);
       if (!resolved) { removeConflictFromQueue(conflict); return; } // already gone (e.g. deleted since) - just drop it
 
+      let replacedAttId = null; // stored bytes this resolution may leave unreferenced
+
       if (resolved.kind === 'field') {
         const m = resolved.member;
-        if (choice === 'remote') m[conflict.field] = conflict.remote;
+        if (choice === 'remote') {
+          let val = conflict.remote;
+          if (conflict.field === 'bloodTypeAttachment') {
+            // The queued remote copy still carries the export file's raw .data and an id from the
+            // OTHER browser. Give it real bytes in this browser's IndexedDB first (the same step a
+            // normal import runs in migrateMemberAttachmentsToIdb); otherwise a fat object would land
+            // inline in localStorage and point at bytes that don't exist here.
+            if (val && typeof val === 'object' && val.data) {
+              if (!(await ensureUnlocked())) return;
+              [val] = await persistAttachmentsToIdb([val]);
+            }
+            replacedAttId = m.bloodTypeAttachment && m.bloodTypeAttachment.id;
+          }
+          m[conflict.field] = val;
+        }
         if (!m.fieldVersion) m.fieldVersion = freshFieldVersions();
         m.fieldVersion[conflict.field] = (m.fieldVersion[conflict.field] || 1) + 1;
         bumpVersion(m);
@@ -3924,10 +3937,44 @@
           }
           bumpVersion(entity);
         } else if (choice === 'both') {
-          const dup = deepCloneAndRemapIds(conflict.remote);
+          // The duplicate must be fully independent of the original: fresh id for the entity, for every
+          // nested entity, and for every attachment, with the attachment bytes copied under the new ids.
+          // (v47 and earlier reused the original's ids here, so both copies shared one stored file.)
+          const { clone: dup, attachments: dupAtts } = FHSMerge.cloneWithFreshIds(
+            conflict.remote, kind => (kind === 'att' ? makeAttId() : freshId('imp')));
+          const liveAtts = dupAtts.filter(a => !a.att.deletedAt);
+          if (liveAtts.length && !(await ensureUnlocked())) return;
+          const written = [];
+          try {
+            for (const { oldId, att } of liveAtts) {
+              // bytes: embedded in the queued copy, else a copy already stored here under the old id
+              let bytes = att.data || null;
+              if (!bytes) bytes = await idbGet(oldId);
+              if (bytes) {
+                await idbPut(att.id, bytes);
+                written.push(att.id);
+                if (!att.thumb && att.type === 'image') att.thumb = await makeThumbFromDataUrl(bytes);
+                if (!att.size) att.size = bytes.length;
+              }
+              delete att.data;
+            }
+          } catch (err) {
+            await idbDeleteMany(written);
+            alert("Couldn't copy the attachment(s) for the duplicate: " + (err && err.message ? err.message : err));
+            return; // nothing was added, conflict stays in the queue
+          }
           Object.assign(dup, freshSyncMeta());
+          const prevVersion = entity.version, prevUpdatedAt = entity.updatedAt;
           arr.splice(idx + 1, 0, dup);
           bumpVersion(entity); // settles the original's side of the tie too
+          if (!saveData()) {
+            arr.splice(idx + 1, 1);
+            entity.version = prevVersion; entity.updatedAt = prevUpdatedAt;
+            await idbDeleteMany(written);
+            return;
+          }
+          removeConflictFromQueue(conflict);
+          return;
         } else {
           bumpVersion(entity); // 'local' - content unchanged, just settle
         }
@@ -3935,6 +3982,17 @@
 
       saveData();
       removeConflictFromQueue(conflict);
+      if (replacedAttId) await purgeUnreferencedAttachmentBytes([replacedAttId]);
+    }
+
+    // Deletes the stored bytes of any candidate attachment id that no live entity references any more.
+    // Reference-counted (FHSMerge.collectLiveAttachmentIds looks at every member), so a file that is
+    // still used somewhere is never removed. Call only AFTER the change that freed it has been saved.
+    async function purgeUnreferencedAttachmentBytes(candidateIds) {
+      const live = new Set(FHSMerge.collectLiveAttachmentIds(members));
+      const doomed = candidateIds.filter(id => id && !live.has(id));
+      if (doomed.length) await idbDeleteMany(doomed);
+      return doomed.length;
     }
 
     function removeConflictFromQueue(conflict) {
@@ -4005,6 +4063,8 @@
           : `"${incoming.name}" doesn't match any current family member.\n\nAdd them as a new member from this file?`;
         if (!confirm(label)) continue;
         const previousMembers = members;
+        // attachment files in use by this member before the merge (to find what the merge frees)
+        const beforeAttIds = isUpdate ? FHSMerge.collectLiveAttachmentIds([members[idx]]) : [];
 
         let finalMember, conflicts = [];
         if (isUpdate) {
@@ -4025,9 +4085,14 @@
         members = nextMembers;
         if (!saveData()) {
           members = previousMembers;
+          // migrateMemberAttachmentsToIdb already stored bytes for attachments that never got committed
+          const stillUsed = new Set(FHSMerge.collectLiveAttachmentIds(previousMembers));
+          await idbDeleteMany(FHSMerge.collectLiveAttachmentIds([migrated]).filter(id => !stillUsed.has(id)));
           alert(`Couldn't save the imported data for "${incoming.name}" - storage may be full.`);
           continue;
         }
+        // saved: drop the bytes of files the merge replaced / tombstoned (and nothing else uses)
+        if (beforeAttIds.length) await purgeUnreferencedAttachmentBytes(beforeAttIds);
         totalNewConflicts += appendConflicts(migrated.id, migrated.name, conflicts);
         currentMemberId = migrated.id;
         currentTab = 'overview';

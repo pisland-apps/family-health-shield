@@ -3,7 +3,8 @@
 // Exits non-zero and prints failures if anything breaks.
 
 const {
-  mergeMembers, mergeSyncArray, mergeAttachmentArray, freshFieldVersions
+  mergeMembers, mergeSyncArray, mergeAttachmentArray, freshFieldVersions,
+  cloneWithFreshIds, collectLiveAttachmentIds, orphanedAttachmentIds
 } = require('./merge-engine.js');
 
 let pass = 0, fail = 0;
@@ -316,6 +317,103 @@ function deepJSON(x) { return JSON.stringify(x); }
   remote2[0].bloodTypeAttachment = { id: 'att2', name: 'newer.jpg', type: 'image', thumb: 'data:...thumb2', size: 999 };
   const r2 = mergeMembers(clone(local), clone(remote2));
   ok('bloodTypeAttachment: genuine change still conflicts', r2.conflicts.some(c => c.field === 'bloodTypeAttachment'));
+})();
+
+
+// ============================================================
+// 12. v48: attachment lifecycle helpers.
+// (a) "Keep Both" clone must not share ANY id with the original
+// (b) reference-counted "which attachment bytes are still in use"
+// (c) merge -> orphaned ids = exactly what the merge killed
+// ============================================================
+function att(id, extra) { return Object.assign({ id, name: id + '.jpg', type: 'image', size: 10, deletedAt: null }, extra || {}); }
+
+(function testCloneWithFreshIds() {
+  const policy = makePolicy('pol1', {
+    attachments: [att('att_p1'), att('att_p2', { deletedAt: '2026-02-01T00:00:00.000Z' })],
+    ledger: [Object.assign({ id: 'led1', date: '2026-01-01', amount: '5', type: 'Premium', method: 'Cash', notes: '', attachments: [att('att_l1')] }, freshMeta())],
+    coverages: [makeCoverage('cov1', { sumInsuredHistory: [Object.assign({ id: 'sih1', date: '2026-01-01', amount: '1' }, freshMeta())] })]
+  });
+  const frozen = JSON.stringify(policy);
+  let n = 0;
+  const { clone: dup, attachments } = cloneWithFreshIds(policy, kind => `${kind}_new${++n}`);
+
+  ok('clone: original untouched', JSON.stringify(policy) === frozen);
+  const collectIds = (v, out) => { out = out || []; if (Array.isArray(v)) v.forEach(x => collectIds(x, out)); else if (v && typeof v === 'object') { if ('id' in v) out.push(v.id); Object.keys(v).forEach(k => collectIds(v[k], out)); } return out; };
+  const oldIds = new Set(collectIds(policy)), newIds = collectIds(dup);
+  ok('clone: no id shared with the original', newIds.every(id => !oldIds.has(id)), `shared: ${newIds.filter(id => oldIds.has(id))}`);
+  ok('clone: all ids unique inside the clone', new Set(newIds).size === newIds.length);
+  ok('clone: same number of ids as original', newIds.length === oldIds.size);
+  ok('clone: attachments reported with old/new ids', attachments.length === 3 &&
+    attachments.every(a => a.newId.startsWith('att_new') && a.att.id === a.newId) &&
+    attachments.map(a => a.oldId).sort().join() === 'att_l1,att_p1,att_p2');
+  ok('clone: non-id fields preserved', dup.provider === 'Acme' && dup.ledger[0].amount === '5' && dup.coverages[0].sumInsuredHistory[0].amount === '1');
+  ok('clone: tombstone on attachment preserved', dup.attachments[1].deletedAt === '2026-02-01T00:00:00.000Z');
+
+  // references that point OUTSIDE the cloned entity (a claim -> policy/coverage) are not ids and stay
+  const claim = Object.assign({ id: 'clm1', policyId: 'pol1', coverageId: 'cov1', date: '2026-01-01', status: 'Open', amountClaimed: '1', amountPaid: '0', details: '' }, freshMeta());
+  const c2 = cloneWithFreshIds(claim, k => k + '_x').clone;
+  ok('clone: policyId / coverageId references kept', c2.policyId === 'pol1' && c2.coverageId === 'cov1' && c2.id === 'ent_x');
+})();
+
+(function testCollectLiveAttachmentIds() {
+  const m = makeMember('m1', {
+    bloodTypeAttachment: att('att_blood'),
+    records: [
+      makeRecord('r1', { attachments: [att('att_a'), att('att_dead', { deletedAt: '2026-02-01T00:00:00.000Z' })] }),
+      makeRecord('r2', { attachments: [att('att_shared')] }),
+      makeRecord('r3', { deletedAt: '2026-02-01T00:00:00.000Z', attachments: [att('att_in_dead_record'), att('att_shared')] })
+    ],
+    insurance: { policies: [makePolicy('p1', { attachments: [att('att_pol')], ledger: [Object.assign({ id: 'l1', attachments: [att('att_led')] }, freshMeta())], surrenderRecords: [Object.assign({ id: 's1', attachments: [att('att_sur')] }, freshMeta())] })], claims: [] }
+  });
+  const ids = collectLiveAttachmentIds([m]).sort();
+  ok('collect: live ones found (blood, record, policy, ledger, surrender)',
+    ['att_a', 'att_blood', 'att_led', 'att_pol', 'att_shared', 'att_sur'].every(i => ids.includes(i)), ids.join());
+  ok('collect: tombstoned attachment excluded', !ids.includes('att_dead'));
+  ok('collect: attachment inside tombstoned record excluded', !ids.includes('att_in_dead_record'));
+  ok('collect: id also used by a live entity still counts, listed once', ids.filter(i => i === 'att_shared').length === 1);
+  ok('collect: tombstoned member excluded', collectLiveAttachmentIds([Object.assign(clone(m), { deletedAt: 'x' })]).length === 0);
+  ok('orphaned: pure set difference', orphanedAttachmentIds(['a', 'b', 'c'], ['b']).join() === 'a,c');
+})();
+
+(function testMergeThenOrphans() {
+  // before: 6 live attachment references, 5 distinct stored files
+  const local = makeMember('m1', {
+    bloodTypeAttachment: att('att_blood_old'),
+    records: [
+      makeRecord('r1', { attachments: [att('att_r1a'), att('att_r1b')] }),
+      makeRecord('r2', { attachments: [att('att_r2')] }),
+      makeRecord('r3', { attachments: [att('att_shared')] }),
+      makeRecord('r4', { attachments: [att('att_shared')] })     // two records, one stored file
+    ],
+    insurance: { policies: [], claims: [] }
+  });
+  const before = collectLiveAttachmentIds([local]);
+  ok('lifecycle: before has 5 distinct ids (shared file counted once)', before.length === 5, before.join());
+
+  // remote: tombstones att_r1b, tombstones record r2, replaces the blood photo (higher field version),
+  // tombstones r3 (r4 still uses att_shared)
+  const remote = clone(local);
+  remote.version = 5; remote.fieldVersion.bloodTypeAttachment = 3;
+  remote.bloodTypeAttachment = att('att_blood_new');
+  remote.records[0].version = 2;
+  remote.records[0].attachments[1] = att('att_r1b', { deletedAt: '2026-03-01T00:00:00.000Z' });
+  remote.records[1].version = 2; remote.records[1].deletedAt = '2026-03-01T00:00:00.000Z';
+  remote.records[2].version = 2; remote.records[2].deletedAt = '2026-03-01T00:00:00.000Z';
+
+  const merged = mergeMembers(clone([local]), clone([remote])).members;
+  const after = collectLiveAttachmentIds(merged);
+  const orphans = orphanedAttachmentIds(before, after).sort();
+
+  ok('lifecycle: orphans are exactly what the merge killed',
+    orphans.join() === 'att_blood_old,att_r1b,att_r2', orphans.join());
+  ok('lifecycle: survivors not orphaned (att_r1a, att_shared)', after.includes('att_r1a') && after.includes('att_shared'));
+  ok('lifecycle: shared file kept while one referencing record is still live', !orphans.includes('att_shared'));
+  ok('lifecycle: new blood photo is live, not orphaned', after.includes('att_blood_new') && !orphans.includes('att_blood_new'));
+
+  // idempotent: re-merging the same remote kills nothing more
+  const again = mergeMembers(clone(merged), clone([remote])).members;
+  ok('lifecycle: second import of same file orphans nothing', orphanedAttachmentIds(after, collectLiveAttachmentIds(again)).length === 0);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed.`);
