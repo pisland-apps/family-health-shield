@@ -21,7 +21,7 @@
 // ever shows a version that doesn't match what you expect after deploying,
 // that's the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
 // Service Worker/cache in devtools - not a sign the deploy failed.
-const CACHE_VERSION = 'v49';
+const CACHE_VERSION = 'v50';
 const CACHE_NAME = `family-health-shield-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -35,8 +35,19 @@ const APP_SHELL = [
   './icons/icon-maskable-192.png',
   './icons/icon-maskable-512.png',
   './lib/jszip.min.js',
-  './lib/pdf.min.mjs',
-  './lib/pdf.worker.min.mjs'
+  // v50: pdf.js lives in a version-named folder (PDFJS_DIR in app.js) so the
+  // main file, the worker and the decoders can only ever come from the same
+  // release. Keep these lines and PDFJS_DIR in step when pdf.js is updated.
+  './lib/pdfjs-6.4.299/pdf.min.mjs',
+  './lib/pdfjs-6.4.299/pdf.worker.min.mjs',
+  // Image decoders for scanner PDFs. The .wasm files are the normal path; the
+  // *_nowasm_fallback.js are what pdf.js loads instead when the CSP does not
+  // allow compiling WebAssembly (it does not here) - both must work offline.
+  './lib/pdfjs-6.4.299/wasm/jbig2.wasm',
+  './lib/pdfjs-6.4.299/wasm/openjpeg.wasm',
+  './lib/pdfjs-6.4.299/wasm/qcms_bg.wasm',
+  './lib/pdfjs-6.4.299/wasm/jbig2_nowasm_fallback.js',
+  './lib/pdfjs-6.4.299/wasm/openjpeg_nowasm_fallback.js'
 ];
 // './index.html' is deliberately NOT in this list. Cloudflare Pages
 // redirects /index.html -> / by default (documented behavior for its

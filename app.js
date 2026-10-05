@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v49';
-    const APP_VERSION_DATE = '2026-10-02';
+    const APP_VERSION = 'v50';
+    const APP_VERSION_DATE = '2026-10-05';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -25,13 +25,65 @@
     // running AFTER this file, leaving window.pdfjsLib unset right when it's
     // needed. Awaiting this promise at the point of use (see openAttachment())
     // avoids that regardless of any future load-order changes.
-    // Worker vendored locally at ./lib/pdf.worker.min.mjs - must stay in
-    // lockstep with ./lib/pdf.min.mjs's package/version below (mismatched
-    // main/worker builds can fail in confusing ways).
-    const pdfjsLibPromise = import('./lib/pdf.min.mjs').then((mod) => {
-      mod.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.mjs';
+    // v50: everything pdf.js (the main file, its worker and the wasm/ image
+    // decoders) lives in ONE folder whose name carries the version. The main
+    // file and the worker MUST be the same release - a 6.2.108 main file with
+    // a 6.4.299 worker hangs forever ("Unknown action from worker: test") -
+    // and with fixed file names a browser/service-worker cache can hand out
+    // one old and one new file during an update. Version-named paths can
+    // never be mixed that way. To update pdf.js: put the new release's
+    // build/ + wasm/ files in a NEW folder and change only PDFJS_DIR here and
+    // the five ./lib/pdfjs-... lines in service-worker.js.
+    const PDFJS_DIR = 'lib/pdfjs-6.4.299/';
+    const pdfjsLibPromise = import('./' + PDFJS_DIR + 'pdf.min.mjs').then((mod) => {
+      mod.GlobalWorkerOptions.workerSrc = PDFJS_DIR + 'pdf.worker.min.mjs';
       return mod;
     });
+
+    // v50: the one place that opens a PDF with pdf.js (attachment viewer and
+    // the in-page print reports both use it).
+    // - wasmUrl: since pdf.js 5 the image decoders for scanner PDFs (1-bit
+    //   CCITT / JBIG2) and JPEG2000 live in <PDFJS_DIR>wasm/. Without it those
+    //   pages render blank ("JBig2 failed to initialize"). This app's CSP
+    //   (also sent as an HTTP header by _headers, which binds the pdf.js
+    //   worker too) has no 'wasm-unsafe-eval', so the worker cannot compile the
+    //   .wasm files; pdf.js then loads the plain-JavaScript
+    //   *_nowasm_fallback.js from the same folder, which 'self' allows. Both
+    //   kinds of file are shipped; the CSP stays unchanged.
+    // - canvasMaxAreaInBytes: a 600 dpi scanner page is one ~28-megapixel
+    //   1-bit image. By default pdf.js GUESSES the largest canvas this
+    //   browser can make, and when that guess or the allocation fails (memory
+    //   or GPU pressure, so only SOMETIMES) the page stays blank
+    //   ("transferToImageBitmap ... ImageBitmap construction failed"). A fixed
+    //   32 MiB limit (~8.4 Mpx) makes pdf.js shrink such images first, every
+    //   time; ~3300 px wide is still far more than is shown.
+    // - 30 s timeout on opening the document: if the worker never answers
+    //   (e.g. main file and worker out of step), reject with a clear message
+    //   instead of leaving "Loading PDF…" on screen forever.
+    // - isEvalSupported: false - see openAttachment() for why.
+    async function openPdfDocument(pdfjsLib, bytes) {
+      const wasmUrl = new URL(PDFJS_DIR + 'wasm/', document.baseURI).href;
+      const loadingTask = pdfjsLib.getDocument({
+        data: bytes,
+        isEvalSupported: false,
+        wasmUrl,
+        canvasMaxAreaInBytes: 32 * 1024 * 1024
+      });
+      let timer;
+      try {
+        return await Promise.race([
+          loadingTask.promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              loadingTask.destroy();
+              reject(new Error('the PDF viewer did not respond (close and reopen the app once, then try again)'));
+            }, 30000);
+          })
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
 
     // Returns YYYY-MM-DD in the browser's LOCAL timezone (not UTC).
     // toISOString() always returns UTC, which is off by a day for anyone
@@ -2294,7 +2346,7 @@
             // even via a future pdf.js regression of the kind fixed in
             // CVE-2026-16633. Harmless for rendering - eval is only ever used
             // there as a speed optimization, never a required code path.
-            const pdf = await pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise;
+            const pdf = await openPdfDocument(pdfjsLib, bytes);
             body.innerHTML = '';
             const containerWidth = body.clientWidth || 700;
             for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -3076,7 +3128,7 @@
         const blob = dataUrlToBlob(dataUrl);
         const bytes = new Uint8Array(await blob.arrayBuffer());
         const pdfjsLib = await pdfjsLibPromise;
-        const pdf = await pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise;
+        const pdf = await openPdfDocument(pdfjsLib, bytes);
         const containerWidth = container.clientWidth || 360;
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
           const page = await pdf.getPage(pageNum);
