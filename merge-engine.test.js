@@ -5,6 +5,7 @@
 const {
   mergeMembers, mergeSyncArray, mergeAttachmentArray, freshFieldVersions,
   cloneWithFreshIds, collectLiveAttachmentIds, collectAttachmentObjects, orphanedAttachmentIds
+  , POLICY_SCALAR_KEYS
 } = require('./merge-engine.js');
 
 let pass = 0, fail = 0;
@@ -430,6 +431,36 @@ function att(id, extra) { return Object.assign({ id, name: id + '.jpg', type: 'i
   ok('collectAttachmentObjects: exposes raw .data', collectAttachmentObjects(pol).find(a => a.id === 'a3').data === 'D3');
   ok('collectAttachmentObjects: blood-type photo found', collectAttachmentObjects({ bloodTypeAttachment: att('b1') })[0].id === 'b1');
   ok('collectAttachmentObjects: empty for plain values', collectAttachmentObjects({ title: 'x', tags: [] }).length === 0);
+})();
+
+// ============================================================
+// 14. v51: per-policy currency (only 'SGD' is stored; missing = RM)
+// ============================================================
+(function testPolicyCurrency() {
+  ok('currency is a compared policy field', POLICY_SCALAR_KEYS.includes('currency'));
+
+  // old (v50) policy with no field vs same policy with no field: nothing to flag
+  const local = [makeMember('m1')];
+  const same = mergeMembers(clone(local), clone(local));
+  ok('currency: identical RM policies -> no conflicts', same.conflicts.length === 0, String(same.conflicts.length));
+
+  // one side switches the policy to SGD (newer version) -> SGD wins, still no conflict
+  const remote = clone(local);
+  remote[0].insurance.policies[0].currency = 'SGD';
+  remote[0].insurance.policies[0].version = 2;
+  const up = mergeMembers(clone(local), clone(remote));
+  ok('currency: newer SGD edit wins over RM', up.members[0].insurance.policies[0].currency === 'SGD');
+  ok('currency: newer edit is not a conflict', up.conflicts.length === 0, String(up.conflicts.length));
+
+  // both sides edit the same version differently -> a real conflict is raised
+  const a = clone(local); a[0].insurance.policies[0].currency = 'SGD'; a[0].insurance.policies[0].version = 2;
+  const b = clone(local); b[0].insurance.policies[0].premium = '999'; b[0].insurance.policies[0].version = 2;
+  const both = mergeMembers(clone(a), clone(b));
+  ok('currency: concurrent edits (currency vs premium) are flagged', both.conflicts.length >= 1, String(both.conflicts.length));
+
+  // re-importing the same file never grows conflicts
+  const again = mergeMembers(clone(both.members), clone(b));
+  ok('currency: second import does not add conflicts', again.conflicts.length <= both.conflicts.length);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed.`);

@@ -7,8 +7,8 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v50';
-    const APP_VERSION_DATE = '2026-10-05';
+    const APP_VERSION = 'v51';
+    const APP_VERSION_DATE = '2026-10-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
     // done at top level, not inside init()/initAppData(), so it renders before any
@@ -1647,22 +1647,37 @@
     // A short one-line summary per entity type, for the two "before/after"
     // columns - design 2.7 explicitly wants no inline diffing, just enough
     // to tell the two versions apart at a glance.
-    function summarizeConflictSide(containerKey, obj) {
+    function summarizeConflictSide(containerKey, obj, cur) {
       if (obj === null || obj === undefined) return '(none)';
       if (typeof obj !== 'object') return escapeHtml(String(obj)); // field-level conflicts are plain values
       switch (containerKey) {
         case 'records': return escapeHtml(`${obj.title || obj.type || 'Record'} · ${obj.date || ''}`);
         case 'customReminders': return escapeHtml(`${obj.title || 'Reminder'} · due ${obj.dueDate || ''}`);
         case 'historyEntries': return escapeHtml(obj.text || '');
-        case 'policies': return escapeHtml(`${obj.provider || ''} ${obj.number || ''} · ${insFmtMoney(obj.premium)}/${obj.frequency || ''}`);
-        case 'ledger': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount)} (${obj.method || ''})`);
+        case 'policies': return escapeHtml(`${obj.provider || ''} ${obj.number || ''} · ${insFmtMoney(obj.premium, insPolicyCur(obj))}/${obj.frequency || ''}`);
+        case 'ledger': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount, cur)} (${obj.method || ''})`);
         case 'riders': return escapeHtml(`${obj.description || ''} · due ${obj.dueDate || ''}`);
-        case 'coverages': return escapeHtml(`${obj.customLabel || obj.type || ''} · sum insured ${insFmtMoney(obj.sumInsured)}`);
-        case 'sumInsuredHistory': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount)}`);
-        case 'surrenderRecords': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(insSurrenderRecordTotal(obj))}`);
-        case 'claims': return escapeHtml(`${obj.date || ''} · ${obj.status || ''} · claimed ${insFmtMoney(obj.amountClaimed)}`);
+        case 'coverages': return escapeHtml(`${obj.customLabel || obj.type || ''} · sum insured ${insFmtMoney(obj.sumInsured, cur)}`);
+        case 'sumInsuredHistory': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(obj.amount, cur)}`);
+        case 'surrenderRecords': return escapeHtml(`${obj.date || ''} · ${insFmtMoney(insSurrenderRecordTotal(obj), cur)}`);
+        case 'claims': return escapeHtml(`${obj.date || ''} · ${obj.status || ''} · claimed ${insFmtMoney(obj.amountClaimed, cur)}`);
         default: return escapeHtml(JSON.stringify(obj).slice(0, 120));
       }
+    }
+
+    // Which currency should a conflicting child entity (ledger row, coverage,
+    // claim, ...) be shown in? Its own policy's. Children are found through the
+    // conflict path (…/policies/<policyId>/…) or, for claims, through policyId.
+    function conflictPolicyCurrency(c) {
+      try {
+        const m = members.find(x => x.id === c.path[0]);
+        if (!m || !m.insurance) return 'MYR';
+        const i = c.path.indexOf('policies');
+        let policyId = i >= 0 ? c.path[i + 1] : null;
+        if (!policyId) policyId = (c.local && c.local.policyId) || (c.remote && c.remote.policyId) || null;
+        const pol = policyId ? m.insurance.policies.find(x => x.id === policyId) : null;
+        return insPolicyCur(pol);
+      } catch (e) { return 'MYR'; }
     }
 
     function renderConflictModal() {
@@ -1685,8 +1700,9 @@
         const containerKey = c.field ? null : c.path[c.path.length - 2];
         // an entity deleted on one side must say so; its title / date alone would read as a normal edit
         const side = (o, s) => (o && typeof o === 'object' && o.deletedAt) ? '\u{1F5D1}\u{FE0F} Deleted \u2014 ' + s : s;
-        const localSummary = side(c.local, summarizeConflictSide(containerKey, c.local));
-        const remoteSummary = side(c.remote, summarizeConflictSide(containerKey, c.remote));
+        const cCur = c.field ? 'MYR' : conflictPolicyCurrency(c);
+        const localSummary = side(c.local, summarizeConflictSide(containerKey, c.local, cCur));
+        const remoteSummary = side(c.remote, summarizeConflictSide(containerKey, c.remote, cCur));
         // "keep both" only makes sense for array-item entities (not a single scalar field), and only when
         // their side still exists: a deleted copy would be inserted as an invisible duplicate
         const allowBoth = !c.field && !(c.remote && c.remote.deletedAt);
@@ -4476,9 +4492,64 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!m.insurance.claims) m.insurance.claims = [];
     }
 
-    function insFmtMoney(n) {
+    // ----- Per-policy currency (v51) -----
+    // A policy carries an optional `currency` field. Only 'SGD' is ever stored;
+    // a missing field means RM (MYR), so every pre-v51 policy and every v50
+    // export file keeps working with no migration and no false merge conflicts.
+    // All amounts on a policy (premium, sum insured, limits, ledger, claims,
+    // surrender values, payout) use that policy's currency. Totals are never
+    // added across currencies - they are kept per currency (no exchange rate).
+    const INS_CUR_ORDER = ['MYR', 'SGD'];
+    function insPolicyCur(p) { return p && p.currency === 'SGD' ? 'SGD' : 'MYR'; }
+    function insCurPrefix(cur) { return cur === 'SGD' ? 'S$ ' : 'RM '; }
+    function insCurName(cur) { return cur === 'SGD' ? 'S$ (SGD)' : 'RM (MYR)'; }
+    function insFmtMoney(n, cur) {
       if (n === undefined || n === null || n === '') return '--';
-      return 'RM ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return insCurPrefix(cur) + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    // ' · amounts in S$ (SGD)' suffix for modal titles; empty for RM so existing titles are unchanged
+    function insTitleCur(p) { return insPolicyCur(p) === 'SGD' ? ' · amounts in ' + insCurName('SGD') : ''; }
+    function insNewCurTotals() { return { MYR: 0, SGD: 0 }; }
+    // Formats a { MYR, SGD } totals map. Only currencies with a non-zero amount
+    // are shown (RM alone when everything is zero), joined by `sep`.
+    function insFmtMulti(totals, sep) {
+      const shown = INS_CUR_ORDER.filter(c => totals[c]);
+      return (shown.length ? shown : ['MYR']).map(c => insFmtMoney(totals[c] || 0, c)).join(sep === undefined ? ' · ' : sep);
+    }
+    // Per-currency roll-up used by both the Overview tab and the full report.
+    // by-type maps are { MYR: {label: amount}, SGD: {...} }; totals are { MYR, SGD }.
+    function insComputeSummary(m) {
+      const activePolicies = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
+      const ASSET_TYPES = ['Home', 'Car'];
+      const out = {
+        activePolicies,
+        insuredByType: { MYR: {}, SGD: {} }, assetByType: { MYR: {}, SGD: {} },
+        medAnnual: insNewCurTotals(), medLifetimeRemaining: insNewCurTotals(),
+        surrender: insNewCurTotals(), insured: insNewCurTotals(), asset: insNewCurTotals()
+      };
+      activePolicies.forEach(p => {
+        const cur = insPolicyCur(p);
+        (p.coverages||[]).forEach(c => {
+          if (c.type === 'Health/Medical') {
+            if (c.annualLimit) out.medAnnual[cur] += Number(c.annualLimit) || 0;
+            if (c.lifetimeLimit) out.medLifetimeRemaining[cur] += Number(c.lifetimeLimit) - insCoverageClaimedTotal(m, p.id, c.id);
+            return; // Health/Medical is limit-based, not sum-insured-based - excluded from the sum insured breakdown
+          }
+          const amt = insEffectiveSumInsured(c);
+          if (!amt) return;
+          const bucket = ASSET_TYPES.includes(c.type) ? out.assetByType[cur] : out.insuredByType[cur];
+          bucket[insCoverageLabel(c)] = (bucket[insCoverageLabel(c)] || 0) + amt;
+          if (ASSET_TYPES.includes(c.type)) out.asset[cur] += amt; else out.insured[cur] += amt;
+        });
+        out.surrender[cur] += insLatestSurrenderTotal(p) || 0;
+      });
+      return out;
+    }
+    // [[currency, label, amount], ...] flattened in currency order
+    function insFlattenByType(byType) {
+      const rows = [];
+      INS_CUR_ORDER.forEach(cur => Object.entries(byType[cur] || {}).forEach(([label, amt]) => rows.push([cur, label, amt])));
+      return rows;
     }
     function insDaysUntil(dateStr) {
       if (!dateStr) return null;
@@ -4507,9 +4578,14 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       hintEl.textContent = age !== null ? `Member will be age ${age} on this date` : '';
     }
 
+    // Returns { MYR, SGD } - never adds premiums of different currencies together.
     function insAnnualPremium(m) {
       const mult = { Monthly: 12, Quarterly: 4, Yearly: 1, Single: 0 };
-      return live(m.insurance.policies).filter(p => p.status !== 'Discontinued').reduce((sum, p) => sum + (Number(p.premium)||0) * (mult[p.frequency] ?? 1), 0);
+      const totals = insNewCurTotals();
+      live(m.insurance.policies).filter(p => p.status !== 'Discontinued').forEach(p => {
+        totals[insPolicyCur(p)] += (Number(p.premium)||0) * (mult[p.frequency] ?? 1);
+      });
+      return totals;
     }
 
     const INS_TYPE_DISPLAY_OVERRIDES = { 'Home': 'Home/Fire', 'Accident': 'Personal Accident' };
@@ -4590,7 +4666,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         if (payout) {
           const pd = insDaysUntil(payout.date);
           reminders.push({
-            title: `Payout — ${p.provider || insPolicyTypeSummary(p)} (~${insFmtMoney(payout.amount)})`,
+            title: `Payout — ${p.provider || insPolicyTypeSummary(p)} (~${insFmtMoney(payout.amount, insPolicyCur(p))})`,
             date: payout.date,
             days: pd,
             status: pd < 0 ? 'overdue' : pd <= 30 ? 'upcoming' : 'ok'
@@ -4654,33 +4730,15 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const totalClaims = live(m.insurance.claims).length;
       const activePolicies = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
 
-      const insuredByType = {};
-      const assetByType = {};
-      const ASSET_TYPES = ['Home', 'Car'];
-      let totalMedicalAnnualLimit = 0;
-      let totalMedicalLifetimeRemaining = 0;
-      activePolicies.forEach(p => (p.coverages||[]).forEach(c => {
-        if (c.type === 'Health/Medical') {
-          if (c.annualLimit) totalMedicalAnnualLimit += Number(c.annualLimit) || 0;
-          if (c.lifetimeLimit) {
-            const remaining = Number(c.lifetimeLimit) - insCoverageClaimedTotal(m, p.id, c.id);
-            totalMedicalLifetimeRemaining += remaining;
-          }
-          return; // Health/Medical is limit-based, not sum-insured-based - excluded from the sum insured breakdown below
-        }
-        const amt = insEffectiveSumInsured(c);
-        if (!amt) return;
-        if (ASSET_TYPES.includes(c.type)) {
-          assetByType[insCoverageLabel(c)] = (assetByType[insCoverageLabel(c)] || 0) + amt;
-        } else {
-          insuredByType[insCoverageLabel(c)] = (insuredByType[insCoverageLabel(c)] || 0) + amt;
-        }
-      }));
-      const totalInsured = Object.values(insuredByType).reduce((s,v) => s+v, 0);
-      const totalAssetInsured = Object.values(assetByType).reduce((s,v) => s+v, 0);
-      const totalSurrender = activePolicies.reduce((s,p) => s + (insLatestSurrenderTotal(p) || 0), 0);
-      const hasMedical = totalMedicalAnnualLimit > 0 || totalMedicalLifetimeRemaining > 0;
-      const hasAssets = Object.keys(assetByType).length > 0;
+      const sum = insComputeSummary(m);
+      const insuredRows = insFlattenByType(sum.insuredByType);
+      const assetRows = insFlattenByType(sum.assetByType);
+      const hasMedical = INS_CUR_ORDER.some(c => sum.medAnnual[c] > 0 || sum.medLifetimeRemaining[c] > 0);
+      const hasAssets = assetRows.length > 0;
+      const typeRowsHtml = rows => rows.map(([cur, type, amt]) => `
+            <div class="s-5911b194">
+              <span>${escapeHtml(type)}</span><span class="s-a5d2baa1">${insFmtMoney(amt, cur)}</span>
+            </div>`).join('');
 
       return `
         <div class="card s-81f3194f">
@@ -4691,32 +4749,26 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="card-title">📊 Summary</div>
           <div class="stats-grid">
             <div class="stat-box"><div class="stat-value">${activePolicies.length}</div><div class="stat-label">Active Policies</div></div>
-            <div class="stat-box"><div class="stat-value">${insFmtMoney(insAnnualPremium(m))}</div><div class="stat-label">Premium / Year</div></div>
-            <div class="stat-box"><div class="stat-value">${insFmtMoney(totalSurrender)}</div><div class="stat-label">Total Surrender Value</div></div>
+            <div class="stat-box"><div class="stat-value">${insFmtMulti(insAnnualPremium(m), '<br>')}</div><div class="stat-label">Premium / Year</div></div>
+            <div class="stat-box"><div class="stat-value">${insFmtMulti(sum.surrender, '<br>')}</div><div class="stat-label">Total Surrender Value</div></div>
             <div class="stat-box"><div class="stat-value">${upcoming}</div><div class="stat-label">Due Soon / Overdue</div></div>
           </div>
         </div>
         <div class="card">
-          <div class="card-title">🛡️ Total Insured — ${insFmtMoney(totalInsured)}</div>
-          ${Object.keys(insuredByType).length ? Object.entries(insuredByType).map(([type, amt]) => `
-            <div class="s-5911b194">
-              <span>${escapeHtml(type)}</span><span class="s-a5d2baa1">${insFmtMoney(amt)}</span>
-            </div>`).join('') : '<p class="s-51f2817c">No sum insured recorded on active policies yet.</p>'}
+          <div class="card-title">🛡️ Total Insured — ${insFmtMulti(sum.insured)}</div>
+          ${insuredRows.length ? typeRowsHtml(insuredRows) : '<p class="s-51f2817c">No sum insured recorded on active policies yet.</p>'}
         </div>
         ${hasAssets ? `
         <div class="card">
-          <div class="card-title">🏠 Property & Asset Insured — ${insFmtMoney(totalAssetInsured)}</div>
-          ${Object.entries(assetByType).map(([type, amt]) => `
-            <div class="s-5911b194">
-              <span>${escapeHtml(type)}</span><span class="s-a5d2baa1">${insFmtMoney(amt)}</span>
-            </div>`).join('')}
+          <div class="card-title">🏠 Property & Asset Insured — ${insFmtMulti(sum.asset)}</div>
+          ${typeRowsHtml(assetRows)}
         </div>` : ''}
         ${hasMedical ? `
         <div class="card">
           <div class="card-title">🏥 Health/Medical Limits</div>
           <div class="stats-grid">
-            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalMedicalAnnualLimit)}</div><div class="stat-label">Total Annual Limit</div></div>
-            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalMedicalLifetimeRemaining)}</div><div class="stat-label">Total Lifetime Limit Remaining</div></div>
+            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMulti(sum.medAnnual, '<br>')}</div><div class="stat-label">Total Annual Limit</div></div>
+            <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMulti(sum.medLifetimeRemaining, '<br>')}</div><div class="stat-label">Total Lifetime Limit Remaining</div></div>
           </div>
         </div>` : ''}
         <div class="card">
@@ -4784,12 +4836,12 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             </div>
           </div>
           <div class="policy-grid">
-            <div><div class="policy-field-label">Premium</div><div class="policy-field-value">${insFmtMoney(p.premium)} / ${escapeHtml(p.frequency)}</div></div>
+            <div><div class="policy-field-label">Premium</div><div class="policy-field-value">${insFmtMoney(p.premium, insPolicyCur(p))} / ${escapeHtml(p.frequency)}</div></div>
             <div><div class="policy-field-label">Start</div><div class="policy-field-value">${escapeHtml(p.start || '--')}${p.start && insAgeAtDate(m.birth, p.start) !== null ? ` <span class="s-fb01568b">(age ${insAgeAtDate(m.birth, p.start)})</span>` : ''}</div></div>
             <div><div class="policy-field-label">Expiry</div><div class="policy-field-value">${escapeHtml(p.expiry || '--')}${p.expiry && insAgeAtDate(m.birth, p.expiry) !== null ? ` <span class="s-fb01568b">(age ${insAgeAtDate(m.birth, p.expiry)})</span>` : ''}</div></div>
           </div>
           ${coverages.length ? `<div class="s-097e6af4">${coverages.map(c => insRenderCoverageSummary(m, p, c)).join('')}</div>` : '<p class="s-e1b40251">No coverage details added yet — click ✏️ to add.</p>'}
-          ${payout ? `<div class="s-406b76fd">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} · next payout ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</div>` : ''}
+          ${payout ? `<div class="s-406b76fd">🎉 Cashback benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount, insPolicyCur(p))} · next payout ~${insFmtMoney(payout.amount, insPolicyCur(p))} on ${escapeHtml(payout.date)}</div>` : ''}
           ${p.premiumPaidByBonus ? `<div class="s-e6bec453">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</div>` : ''}
           ${(() => { const liveAtts = live(p.attachments || []); return liveAtts.length ? `<div class="s-eae4831c">${liveAtts.map((att, idx) => `<span class="tag tag-gray s-58aba575" data-ins-open-attachment="${escapeHtml(p.id)}" data-ins-att-idx="${idx}">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''; })()}
           ${p.notes ? `<div class="s-ca2edd98">${escapeHtml(p.notes)}</div>` : ''}
@@ -4805,7 +4857,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           }).join('')}</div>` : ''; })()}
           <div class="s-79744520">
             <button class="btn btn-secondary btn-sm" data-ins-open-ledger="${escapeHtml(p.id)}">📒 Ledger (${live(p.ledger||[]).length})</button>
-            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${escapeHtml(p.id)}">💰 Surrender Value: ${insFmtMoney(surrenderTotal)}</button>` : `<span data-ins-open-surrender="${escapeHtml(p.id)}" class="s-41b07b38">+ Track Surrender Value</span>`}
+            ${surrenderTotal ? `<button class="btn btn-secondary btn-sm" data-ins-open-surrender="${escapeHtml(p.id)}">💰 Surrender Value: ${insFmtMoney(surrenderTotal, insPolicyCur(p))}</button>` : `<span data-ins-open-surrender="${escapeHtml(p.id)}" class="s-41b07b38">+ Track Surrender Value</span>`}
             <button class="btn btn-secondary btn-sm" data-ins-open-report="${escapeHtml(p.id)}">🖨️ View / Print</button>
           </div>
         </div>
@@ -4823,13 +4875,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         <div class="s-30ddb801">
           <div class="s-afb018e5">
             <span class="tag tag-gray">${escapeHtml(insCoverageLabel(c))}${c.reducing ? ' 📉 Reducing' : ''}</span>
-            ${currentSum ? `<span class="s-c0ec2360">${insFmtMoney(currentSum)}</span>` : ''}
+            ${currentSum ? `<span class="s-c0ec2360">${insFmtMoney(currentSum, insPolicyCur(p))}</span>` : ''}
           </div>
           ${c.expiry ? `<div class="s-ff6eee77"><span class="tag ${covTagClass}" title="This coverage's own expiry differs from the policy's overall expiry">🗓️ Expires ${escapeHtml(c.expiry)}</span></div>` : ''}
           ${isMedical && (c.lifetimeLimit || c.annualLimit) ? `
           <div class="policy-grid s-d79ce2bc">
-            ${c.annualLimit ? `<div><div class="policy-field-label">Annual Limit</div><div class="policy-field-value">${insFmtMoney(c.annualLimit)}</div></div>` : ''}
-            ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime)} <span class="s-5594ca44">/ ${insFmtMoney(c.lifetimeLimit)}</span></div></div>` : ''}
+            ${c.annualLimit ? `<div><div class="policy-field-label">Annual Limit</div><div class="policy-field-value">${insFmtMoney(c.annualLimit, insPolicyCur(p))}</div></div>` : ''}
+            ${c.lifetimeLimit ? `<div><div class="policy-field-label">Lifetime Limit Remaining</div><div class="policy-field-value">${insFmtMoney(remainingLifetime, insPolicyCur(p))} <span class="s-5594ca44">/ ${insFmtMoney(c.lifetimeLimit, insPolicyCur(p))}</span></div></div>` : ''}
           </div>` : ''}
           ${c.reducing ? `<div class="s-d79ce2bc"><span data-ins-open-sumhistory="${escapeHtml(p.id)}" data-ins-cov-id="${escapeHtml(c.id)}" class="s-c0623ab3">📉 View / Update Sum Insured History (${live(c.sumInsuredHistory||[]).length})</span></div>` : ''}
         </div>
@@ -4865,8 +4917,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             </div>
           </div>
           <div class="policy-grid">
-            <div><div class="policy-field-label">Claimed</div><div class="policy-field-value">${insFmtMoney(c.amountClaimed)}</div></div>
-            <div><div class="policy-field-label">Paid Out</div><div class="policy-field-value">${insFmtMoney(c.amountPaid)}</div></div>
+            <div><div class="policy-field-label">Claimed</div><div class="policy-field-value">${insFmtMoney(c.amountClaimed, insPolicyCur(p))}</div></div>
+            <div><div class="policy-field-label">Paid Out</div><div class="policy-field-value">${insFmtMoney(c.amountPaid, insPolicyCur(p))}</div></div>
           </div>
           ${c.details ? `<div class="s-ca2edd98">${escapeHtml(c.details)}</div>` : ''}
         </div>
@@ -4944,6 +4996,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('insPStatus').value = p && p.status ? p.status : 'Active';
       document.getElementById('insPProvider').value = p ? p.provider : '';
       document.getElementById('insPNumber').value = p ? p.number : '';
+      document.getElementById('insPCurrency').value = insPolicyCur(p);
       document.getElementById('insPPremium').value = p ? p.premium : '';
       document.getElementById('insPFrequency').value = p ? p.frequency : 'Yearly';
       document.getElementById('insPStart').value = p ? p.start : '';
@@ -5172,8 +5225,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         premiumPaidByBonus: bonusPaidEnabled,
         premiumPaidByBonusSince: bonusPaidEnabled ? document.getElementById('insPBonusPaidSince').value : ''
       };
+      // Only SGD is stored; RM is "no currency field" (see insPolicyCur) so
+      // old policies / v50 exports compare equal and never raise false conflicts.
+      const newCurrency = document.getElementById('insPCurrency').value === 'SGD' ? 'SGD' : null;
+      if (newCurrency) data.currency = newCurrency;
       if (existingPolicy) {
         Object.assign(existingPolicy, data);
+        if (!newCurrency) delete existingPolicy.currency;
         bumpVersion(existingPolicy);
       } else {
         m.insurance.policies.push(Object.assign({ id: insUid(), ledger: [], surrenderRecords: [] }, data, freshSyncMeta()));
@@ -5192,7 +5250,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!p.ledger) p.ledger = [];
       insCurrentLedgerPolicyId = policyId;
       insEditingLedgerId = null;
-      document.getElementById('insLedgerModalTitle').textContent = `Premium Ledger — ${insPolicyTypeSummary(p)}${p.provider ? ' / ' + p.provider : ''}`;
+      document.getElementById('insLedgerModalTitle').textContent = `Premium Ledger — ${insPolicyTypeSummary(p)}${p.provider ? ' / ' + p.provider : ''}${insTitleCur(p)}`;
       insResetLedgerForm();
       insRenderLedgerList(p);
       document.getElementById('insLedgerModal').classList.add('active');
@@ -5223,8 +5281,8 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const totalPayout = (p.ledger||[]).filter(l => l.type === 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
       summaryEl.innerHTML = `
         <div class="stats-grid">
-          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPremium)}</div><div class="stat-label">Total Premium Paid</div></div>
-          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPayout)}</div><div class="stat-label">Total Payout Received</div></div>
+          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPremium, insPolicyCur(p))}</div><div class="stat-label">Total Premium Paid</div></div>
+          <div class="stat-box"><div class="stat-value s-e2151554">${insFmtMoney(totalPayout, insPolicyCur(p))}</div><div class="stat-label">Total Payout Received</div></div>
         </div>`;
       const entries = live(p.ledger).sort((a,b) => new Date(b.date) - new Date(a.date));
       if (!entries.length) {
@@ -5241,7 +5299,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
             ${liveAtts.length ? `<div class="s-bb680ec5">${liveAtts.map((att, idx) => `<span data-ins-open-ledger-att="${escapeHtml(l.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
           </div>
           <div class="s-3b6fff87">
-            <div class="${l.type === 'payout' ? 's-ledger-payout' : 's-ledger-expense'}">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</div>
+            <div class="${l.type === 'payout' ? 's-ledger-payout' : 's-ledger-expense'}">${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount, insPolicyCur(p))}</div>
             <span data-ins-edit-ledger="${escapeHtml(l.id)}" class="s-080a81ee">✏️</span>
             <span data-ins-remove-ledger="${escapeHtml(l.id)}" class="s-abe8a067">🗑️</span>
           </div>
@@ -5375,7 +5433,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!p) return;
       if (!p.surrenderRecords) p.surrenderRecords = [];
       insCurrentSurrenderPolicyId = policyId;
-      document.getElementById('insSurrenderModalTitle').textContent = `Surrender Value — ${insPolicyTypeSummary(p)}${p.provider ? ' / ' + p.provider : ''}`;
+      document.getElementById('insSurrenderModalTitle').textContent = `Surrender Value — ${insPolicyTypeSummary(p)}${p.provider ? ' / ' + p.provider : ''}${insTitleCur(p)}`;
       insResetSurrenderForm();
       insRenderSurrenderList(p);
       document.getElementById('insSurrenderModal').classList.add('active');
@@ -5396,7 +5454,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
     function insRenderSurrenderList(p) {
       const currentEl = document.getElementById('insSurrenderCurrent');
       const total = insLatestSurrenderTotal(p);
-      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Total Surrender Value</div><div class="stat-value s-bffeb9ae">${total === null ? '--' : insFmtMoney(total)}</div></div>`;
+      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Total Surrender Value</div><div class="stat-value s-bffeb9ae">${total === null ? '--' : insFmtMoney(total, insPolicyCur(p))}</div></div>`;
 
       const container = document.getElementById('insSurrenderList');
       const entries = live(p.surrenderRecords).sort((a,b) => new Date(b.date) - new Date(a.date));
@@ -5411,13 +5469,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
           <div class="s-2447f692">
             <div class="s-ea8a0de7">${escapeHtml(r.date||'--')}</div>
             <div class="s-3b6fff87">
-              <div class="s-cc568fe7">${insFmtMoney(insSurrenderRecordTotal(r))}</div>
+              <div class="s-cc568fe7">${insFmtMoney(insSurrenderRecordTotal(r), insPolicyCur(p))}</div>
               <span data-ins-edit-surrender="${escapeHtml(r.id)}" class="s-080a81ee">✏️</span>
               <span data-ins-remove-surrender="${escapeHtml(r.id)}" class="s-abe8a067">🗑️</span>
             </div>
           </div>
           <div class="s-ebc463b1">
-            Bonus ${insFmtMoney(r.accumulatedBonus)} · Investment Fund Value ${insFmtMoney(r.dividend)} · Guaranteed ${insFmtMoney(r.guaranteedCashValue)} · Non-Guaranteed ${insFmtMoney(r.nonGuaranteedValue)}
+            Bonus ${insFmtMoney(r.accumulatedBonus, insPolicyCur(p))} · Investment Fund Value ${insFmtMoney(r.dividend, insPolicyCur(p))} · Guaranteed ${insFmtMoney(r.guaranteedCashValue, insPolicyCur(p))} · Non-Guaranteed ${insFmtMoney(r.nonGuaranteedValue, insPolicyCur(p))}
           </div>
           ${liveAtts.length ? `<div class="s-bb680ec5">${liveAtts.map((att, idx) => `<span data-ins-open-surrender-att="${escapeHtml(r.id)}" data-ins-att-idx="${idx}" class="s-cd942964">${att.type === 'image' ? '🖼️' : '📄'} ${escapeHtml(att.name)}</span>`).join('')}</div>` : ''}
         </div>
@@ -5538,9 +5596,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       if (!c.sumInsuredHistory) c.sumInsuredHistory = [];
       insCurrentSumHistoryPolicyId = policyId;
       insCurrentSumHistoryCoverageId = coverageId;
-      document.getElementById('insSumHistoryModalTitle').textContent = `Sum Insured History — ${insCoverageLabel(c)}${p.provider ? ' / ' + p.provider : ''}`;
+      document.getElementById('insSumHistoryModalTitle').textContent = `Sum Insured History — ${insCoverageLabel(c)}${p.provider ? ' / ' + p.provider : ''}${insTitleCur(p)}`;
       insResetSumHistoryForm();
-      insRenderSumHistoryList(c);
+      insRenderSumHistoryList(c, p);
       document.getElementById('insSumHistoryModal').classList.add('active');
     }
     function insResetSumHistoryForm() {
@@ -5551,9 +5609,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       document.getElementById('insBtnAddSumHistoryEntry').textContent = '+ Add Record';
       document.getElementById('insBtnCancelSumHistoryEdit').style.display = 'none';
     }
-    function insRenderSumHistoryList(c) {
+    function insRenderSumHistoryList(c, p) {
       const currentEl = document.getElementById('insSumHistoryCurrent');
-      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Sum Insured</div><div class="stat-value s-bffeb9ae">${insFmtMoney(insEffectiveSumInsured(c))}</div></div>`;
+      currentEl.innerHTML = `<div class="stat-box s-244a7f30"><div class="stat-label">Current Sum Insured</div><div class="stat-value s-bffeb9ae">${insFmtMoney(insEffectiveSumInsured(c), insPolicyCur(p))}</div></div>`;
 
       const container = document.getElementById('insSumHistoryList');
       const entries = live(c.sumInsuredHistory).sort((a,b) => new Date(b.date) - new Date(a.date));
@@ -5565,7 +5623,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         <div class="s-952fb81a">
           <div class="s-ea8a0de7">${escapeHtml(h.date||'--')}</div>
           <div class="s-3b6fff87">
-            <div class="s-cc568fe7">${insFmtMoney(h.amount)}</div>
+            <div class="s-cc568fe7">${insFmtMoney(h.amount, insPolicyCur(p))}</div>
             <span data-ins-edit-sumhistory="${escapeHtml(h.id)}" class="s-080a81ee">✏️</span>
             <span data-ins-remove-sumhistory="${escapeHtml(h.id)}" class="s-abe8a067">🗑️</span>
           </div>
@@ -5590,7 +5648,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         if (h) tombstone(h);
         saveData();
         if (insEditingSumHistoryId === el.dataset.insRemoveSumhistory) insResetSumHistoryForm();
-        insRenderSumHistoryList(c); renderMain();
+        insRenderSumHistoryList(c, p); renderMain();
       }));
     }
     document.getElementById('insBtnAddSumHistoryEntry').addEventListener('click', () => {
@@ -5610,7 +5668,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       }
       saveData();
       insResetSumHistoryForm();
-      insRenderSumHistoryList(c); renderMain();
+      insRenderSumHistoryList(c, p); renderMain();
     });
     document.getElementById('insBtnCancelSumHistoryEdit').addEventListener('click', insResetSumHistoryForm);
     document.getElementById('insBtnCloseSumHistory').addEventListener('click', () => document.getElementById('insSumHistoryModal').classList.remove('active'));
@@ -5623,7 +5681,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       insEnsureData(m);
       if (!live(m.insurance.policies).length) { alert('Add a policy for this member first'); return; }
       const sel = document.getElementById('insCPolicyId');
-      sel.innerHTML = live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}</option>`).join('');
+      sel.innerHTML = live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${insPolicyCur(p) === 'SGD' ? ' (S$)' : ''}</option>`).join('');
       const c = id ? m.insurance.claims.find(x => x.id === id) : null;
       document.getElementById('insClaimModalTitle').textContent = id ? 'Edit Claim' : 'Add Claim';
       if (c) sel.value = c.policyId;
@@ -5640,11 +5698,13 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const p = m.insurance.policies.find(x => x.id === policyId);
       const covSel = document.getElementById('insCCoverageId');
       const coverages = p ? live(p.coverages || []) : [];
+      const hintEl = document.getElementById('insCCurrencyHint');
+      if (hintEl) hintEl.textContent = 'Amounts are in ' + insCurName(insPolicyCur(p)) + ', the currency of the selected policy.';
       if (!coverages.length) {
         covSel.innerHTML = '<option value="">(no coverage details on this policy)</option>';
         return;
       }
-      covSel.innerHTML = coverages.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(insCoverageLabel(c))}${c.sumInsured ? ' — ' + insFmtMoney(c.sumInsured) : ''}</option>`).join('');
+      covSel.innerHTML = coverages.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(insCoverageLabel(c))}${c.sumInsured ? ' — ' + insFmtMoney(c.sumInsured, insPolicyCur(p)) : ''}</option>`).join('');
       if (selectedCoverageId) covSel.value = selectedCoverageId;
     }
     document.getElementById('insBtnCancelClaim').addEventListener('click', () => document.getElementById('insClaimModal').classList.remove('active'));
@@ -5678,7 +5738,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       const m = members.find(x => x.id === memberId);
       const sel = document.getElementById('insRPolicyId');
       sel.innerHTML = '<option value="all">📋 All Policies (full summary)</option>' +
-        live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
+        live(m.insurance.policies).map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(insPolicyTypeSummary(p))}${p.provider ? ' — ' + escapeHtml(p.provider) : ''}${insPolicyCur(p) === 'SGD' ? ' (S$)' : ''}${p.status === 'Discontinued' ? ' (Discontinued)' : ''}</option>`).join('');
       sel.value = preselectPolicyId || 'all';
       document.getElementById('insRIncludeDiscontinued').checked = false;
       document.getElementById('insReportModal').classList.add('active');
@@ -5692,9 +5752,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         const remaining = (isMedical && c.lifetimeLimit) ? (Number(c.lifetimeLimit) - insCoverageClaimedTotal(m, p.id, c.id)) : null;
         return `<tr>
           <td>${escapeHtml(insCoverageLabel(c))}${c.reducing ? ' (Reducing Term)' : ''}</td>
-          <td>${insFmtMoney(insEffectiveSumInsured(c))}</td>
-          <td>${c.annualLimit ? insFmtMoney(c.annualLimit) : '--'}</td>
-          <td>${c.lifetimeLimit ? insFmtMoney(remaining) + ' / ' + insFmtMoney(c.lifetimeLimit) : '--'}</td>
+          <td>${insFmtMoney(insEffectiveSumInsured(c), insPolicyCur(p))}</td>
+          <td>${c.annualLimit ? insFmtMoney(c.annualLimit, insPolicyCur(p)) : '--'}</td>
+          <td>${c.lifetimeLimit ? insFmtMoney(remaining, insPolicyCur(p)) + ' / ' + insFmtMoney(c.lifetimeLimit, insPolicyCur(p)) : '--'}</td>
         </tr>`;
       }).join('');
 
@@ -5702,17 +5762,17 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
 
       const ledgerRows = [...(p.ledger||[])].sort((a,b) => new Date(a.date) - new Date(b.date)).map(l => `<tr>
         <td>${escapeHtml(l.date||'--')}</td><td>${l.type === 'payout' ? 'Payout Received' : 'Premium Payment'}</td>
-        <td>${escapeHtml(l.method||'--')}</td><td>${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount)}</td><td>${escapeHtml(l.notes||'')}</td>
+        <td>${escapeHtml(l.method||'--')}</td><td>${l.type === 'payout' ? '+' : ''}${insFmtMoney(l.amount, insPolicyCur(p))}</td><td>${escapeHtml(l.notes||'')}</td>
       </tr>`).join('');
       const totalPremiumPaid = (p.ledger||[]).filter(l => l.type !== 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
       const totalPayoutReceived = (p.ledger||[]).filter(l => l.type === 'payout').reduce((s,l) => s + (Number(l.amount)||0), 0);
       const ledgerTotalRow = `<tr class="s-3940c9c2">
-        <td colspan="3" class="s-08a0ed40">Total</td><td>${insFmtMoney(totalPremiumPaid)} paid${totalPayoutReceived ? ' · ' + insFmtMoney(totalPayoutReceived) + ' received' : ''}</td><td></td>
+        <td colspan="3" class="s-08a0ed40">Total</td><td>${insFmtMoney(totalPremiumPaid, insPolicyCur(p))} paid${totalPayoutReceived ? ' · ' + insFmtMoney(totalPayoutReceived, insPolicyCur(p)) + ' received' : ''}</td><td></td>
       </tr>`;
 
       const surrenderRows = [...(p.surrenderRecords||[])].sort((a,b) => new Date(a.date) - new Date(b.date)).map(r => `<tr>
-        <td>${escapeHtml(r.date||'--')}</td><td>${insFmtMoney(r.accumulatedBonus)}</td><td>${insFmtMoney(r.dividend)}</td>
-        <td>${insFmtMoney(r.guaranteedCashValue)}</td><td>${insFmtMoney(r.nonGuaranteedValue)}</td><td><b>${insFmtMoney(insSurrenderRecordTotal(r))}</b></td>
+        <td>${escapeHtml(r.date||'--')}</td><td>${insFmtMoney(r.accumulatedBonus, insPolicyCur(p))}</td><td>${insFmtMoney(r.dividend, insPolicyCur(p))}</td>
+        <td>${insFmtMoney(r.guaranteedCashValue, insPolicyCur(p))}</td><td>${insFmtMoney(r.nonGuaranteedValue, insPolicyCur(p))}</td><td><b>${insFmtMoney(insSurrenderRecordTotal(r), insPolicyCur(p))}</b></td>
       </tr>`).join('');
 
       const relatedClaims = m.insurance.claims.filter(c => c.policyId === p.id);
@@ -5720,7 +5780,7 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         const cov = coverages.find(x => x.id === c.coverageId);
         return `<tr>
           <td>${escapeHtml(c.date||'--')}</td><td>${escapeHtml(cov ? insCoverageLabel(cov) : '--')}</td><td>${escapeHtml(c.status)}</td>
-          <td>${insFmtMoney(c.amountClaimed)}</td><td>${insFmtMoney(c.amountPaid)}</td><td>${escapeHtml(c.details||'')}</td>
+          <td>${insFmtMoney(c.amountClaimed, insPolicyCur(p))}</td><td>${insFmtMoney(c.amountPaid, insPolicyCur(p))}</td><td>${escapeHtml(c.details||'')}</td>
         </tr>`;
       }).join('');
 
@@ -5730,11 +5790,11 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
         <div class="rpt-policy">
           <h3>${p.provider ? escapeHtml(p.provider) : 'Policy'} ${p.status === 'Discontinued' ? '<span class="rpt-badge">DISCONTINUED</span>' : ''}<div class="rpt-policy-subtitle">${escapeHtml(insPolicyTypeSummary(p))}</div></h3>
           <table class="rpt-kv">
-            <tr><td>Policy Number</td><td>${escapeHtml(p.number||'--')}</td><td>Premium</td><td>${insFmtMoney(p.premium)} / ${escapeHtml(p.frequency||'--')}</td></tr>
+            <tr><td>Policy Number</td><td>${escapeHtml(p.number||'--')}</td><td>Premium</td><td>${insFmtMoney(p.premium, insPolicyCur(p))} / ${escapeHtml(p.frequency||'--')}</td></tr>
             <tr><td>Start Date</td><td>${escapeHtml(p.start||'--')}${insAgeAtDate(m.birth, p.start) !== null ? ' (age ' + insAgeAtDate(m.birth, p.start) + ')' : ''}</td><td>Expiry / Next Due</td><td>${escapeHtml(p.expiry||'--')}${insAgeAtDate(m.birth, p.expiry) !== null ? ' (age ' + insAgeAtDate(m.birth, p.expiry) + ')' : ''}</td></tr>
           </table>
           ${coverages.length ? `<table class="rpt-table"><thead><tr><th>Coverage</th><th>Sum Insured</th><th>Annual Limit</th><th>Lifetime Limit (Remaining/Total)</th></tr></thead><tbody>${coverageRows}</tbody></table>` : ''}
-          ${payout ? `<p class="rpt-note">🎉 Payout benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount)} annually from year ${p.payout.startYear} — next due ~${insFmtMoney(payout.amount)} on ${escapeHtml(payout.date)}</p>` : ''}
+          ${payout ? `<p class="rpt-note">🎉 Payout benefit: ${p.payout.percent}% of ${insFmtMoney(p.payout.baseAmount, insPolicyCur(p))} annually from year ${p.payout.startYear} — next due ~${insFmtMoney(payout.amount, insPolicyCur(p))} on ${escapeHtml(payout.date)}</p>` : ''}
           ${p.premiumPaidByBonus ? `<p class="rpt-note">💰 Premium currently paid via Accumulated Cash Bonus${p.premiumPaidByBonusSince ? ' · since ' + escapeHtml(p.premiumPaidByBonusSince) : ''}</p>` : ''}
           ${p.notes ? `<p class="rpt-note">${escapeHtml(p.notes)}</p>` : ''}
           ${riderRows ? `<h4>Riders</h4><table class="rpt-table"><thead><tr><th>Description</th><th>Due Date</th></tr></thead><tbody>${riderRows}</tbody></table>` : ''}
@@ -5763,44 +5823,30 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
 
       let summaryHtml = '';
       if (selectedId === 'all') {
-        const activePolicies = live(m.insurance.policies).filter(p => p.status !== 'Discontinued');
-        const insuredByType = {};
-        const assetByType = {};
-        const ASSET_TYPES = ['Home', 'Car'];
-        let totalMedicalAnnualLimit = 0, totalMedicalLifetimeRemaining = 0;
-        activePolicies.forEach(p => (p.coverages||[]).forEach(c => {
-          if (c.type === 'Health/Medical') {
-            if (c.annualLimit) totalMedicalAnnualLimit += Number(c.annualLimit) || 0;
-            if (c.lifetimeLimit) totalMedicalLifetimeRemaining += Number(c.lifetimeLimit) - insCoverageClaimedTotal(m, p.id, c.id);
-            return;
-          }
-          const amt = insEffectiveSumInsured(c);
-          if (!amt) return;
-          if (ASSET_TYPES.includes(c.type)) {
-            assetByType[insCoverageLabel(c)] = (assetByType[insCoverageLabel(c)] || 0) + amt;
-          } else {
-            insuredByType[insCoverageLabel(c)] = (insuredByType[insCoverageLabel(c)] || 0) + amt;
-          }
-        }));
-        const totalSurrender = activePolicies.reduce((s,p) => s + (insLatestSurrenderTotal(p) || 0), 0);
-        const medicalTable = (totalMedicalAnnualLimit || totalMedicalLifetimeRemaining) ?
+        const sum = insComputeSummary(m);
+        const activePolicies = sum.activePolicies;
+        const typeRows = rows => rows.map(([cur,t,amt]) => `<tr><td>${escapeHtml(t)}</td><td>${insFmtMoney(amt, cur)}</td></tr>`).join('');
+        const insuredRows = insFlattenByType(sum.insuredByType);
+        const assetRows = insFlattenByType(sum.assetByType);
+        const hasMedical = INS_CUR_ORDER.some(c => sum.medAnnual[c] > 0 || sum.medLifetimeRemaining[c] > 0);
+        const medicalTable = hasMedical ?
           `<h4>Health/Medical Limits</h4>
            <table class="rpt-table"><thead><tr><th>Total Annual Limit</th><th>Total Lifetime Limit Remaining</th></tr></thead><tbody>
-           <tr><td>${insFmtMoney(totalMedicalAnnualLimit)}</td><td>${insFmtMoney(totalMedicalLifetimeRemaining)}</td></tr>
+           <tr><td>${insFmtMulti(sum.medAnnual, ' + ')}</td><td>${insFmtMulti(sum.medLifetimeRemaining, ' + ')}</td></tr>
            </tbody></table>` : '';
-        const assetTable = Object.keys(assetByType).length ?
+        const assetTable = assetRows.length ?
           `<h4>Property & Asset Insured</h4>
            <table class="rpt-table"><thead><tr><th>Type</th><th>Total Insured</th></tr></thead><tbody>
-           ${Object.entries(assetByType).map(([t,a]) => `<tr><td>${escapeHtml(t)}</td><td>${insFmtMoney(a)}</td></tr>`).join('')}
+           ${typeRows(assetRows)}
            </tbody></table>` : '';
         summaryHtml = `
           <table class="rpt-kv">
-            <tr><td>Active Policies</td><td>${activePolicies.length}</td><td>Premium / Year</td><td>${insFmtMoney(insAnnualPremium(m))}</td></tr>
-            <tr><td>Total Surrender Value</td><td>${insFmtMoney(totalSurrender)}</td><td>Total Claims Filed</td><td>${m.insurance.claims.length}</td></tr>
+            <tr><td>Active Policies</td><td>${activePolicies.length}</td><td>Premium / Year</td><td>${insFmtMulti(insAnnualPremium(m), ' + ')}</td></tr>
+            <tr><td>Total Surrender Value</td><td>${insFmtMulti(sum.surrender, ' + ')}</td><td>Total Claims Filed</td><td>${m.insurance.claims.length}</td></tr>
           </table>
           <h4>Total Sum Insured by Coverage Type</h4>
           <table class="rpt-table"><thead><tr><th>Coverage Type</th><th>Total Sum Insured</th></tr></thead><tbody>
-          ${Object.entries(insuredByType).map(([t,a]) => `<tr><td>${escapeHtml(t)}</td><td>${insFmtMoney(a)}</td></tr>`).join('') || '<tr><td colspan="2">No sum insured on record</td></tr>'}
+          ${typeRows(insuredRows) || '<tr><td colspan="2">No sum insured on record</td></tr>'}
           </tbody></table>
           ${assetTable}
           ${medicalTable}`;

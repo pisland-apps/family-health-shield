@@ -643,6 +643,14 @@
           <input class="form-input" id="insPNumber" placeholder="e.g. POL-123456">
         </div>
       </div>
+      <div class="form-group">
+        <label class="form-label">Currency</label>
+        <select class="form-select" id="insPCurrency">
+          <option value="MYR">RM (Malaysian Ringgit)</option>
+          <option value="SGD">S$ (Singapore Dollar)</option>
+        </select>
+        <div class="s-5fbcdb68">Every amount on this policy — premium, sum insured, limits, ledger, claims, surrender values — is in this currency. Totals are kept separate per currency, never added together.</div>
+      </div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Premium</label>
@@ -920,6 +928,7 @@
           <input class="form-input" type="number" id="insCAmountPaid" placeholder="e.g. 2500">
         </div>
       </div>
+      <div class="s-5fbcdb68" id="insCCurrencyHint"></div>
       <div class="form-group">
         <label class="form-label">Description</label>
         <textarea class="form-textarea" id="insCDetails" placeholder="What happened, reference number, hospital, etc."></textarea>

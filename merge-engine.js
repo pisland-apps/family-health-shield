@@ -240,7 +240,7 @@ function mergeMemberFields(winner, local, remote, conflicts, path) {
 // surrenderRecords/attachments, all merged separately - design 1.7) ----------
 const POLICY_SCALAR_KEYS = [
   'status', 'provider', 'number', 'premium', 'frequency', 'start', 'expiry',
-  'notes', 'payout', 'premiumPaidByBonus', 'premiumPaidByBonusSince'
+  'notes', 'payout', 'premiumPaidByBonus', 'premiumPaidByBonusSince', 'currency'
 ];
 const RECORD_SCALAR_KEYS = ['date', 'type', 'title', 'details', 'tags', 'vitals'];
 const REMINDER_SCALAR_KEYS = ['title', 'dueDate', 'repeatMonths', 'notes'];
