@@ -7,7 +7,7 @@
     // Service Worker and has no effect on caching. It does NOT auto-sync with
     // CACHE_VERSION in service-worker.js since they live in different files — bump both
     // together on every deploy. (Reminder comment also left in service-worker.js.)
-    const APP_VERSION = 'v51';
+    const APP_VERSION = 'v52';
     const APP_VERSION_DATE = '2026-10-09';
     // Populate the badge immediately — app.js is loaded at the end of <body>, so the DOM
     // (including #versionBadge) already exists by the time this line runs. Deliberately
@@ -3639,40 +3639,110 @@
       errEl.textContent = '';
       const appReady = isEncryptionEnabled() && isUnlocked();
 
-      let exportKey = null;
-      let exportSalt = null;
-      let exportIterVer = null;
-      if (encrypt) {
-        if (appReady) {
-          exportKey = cryptoKey;
-          const cfg = getCryptoConfig();
-          exportSalt = cfg.salt;
-          // Whatever iteration count actually produced cryptoKey right now -
-          // could still be the legacy count if this vault hasn't gone
-          // through migratePbkdf2Iterations() yet. Must match exactly, or
-          // import will derive the wrong key from this file.
-          exportIterVer = cfg.iterVer || 1;
-        } else {
-          const p1 = document.getElementById('exportPasscode1').value;
-          const p2 = document.getElementById('exportPasscode2').value;
-          if (p1.length < 6) { errEl.textContent = 'Passcode must be at least 6 characters.'; return; }
-          if (p1 !== p2) { errEl.textContent = 'Passcodes do not match.'; return; }
-          const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-          exportSalt = bufToB64(saltBytes);
-          exportIterVer = PBKDF2_ITER_VERSION; // fresh salt each export -> always safe to use the current/strongest count
-          exportKey = await deriveKeyFromPasscode(p1, exportSalt, PBKDF2_CONFIGS[exportIterVer]);
-        }
+      // 1) Cheap checks first, so a typo never opens the Save window.
+      let p1 = '';
+      if (encrypt && !appReady) {
+        p1 = document.getElementById('exportPasscode1').value;
+        const p2 = document.getElementById('exportPasscode2').value;
+        if (p1.length < 6) { errEl.textContent = 'Passcode must be at least 6 characters.'; return; }
+        if (p1 !== p2) { errEl.textContent = 'Passcodes do not match.'; return; }
+      }
+      if (pendingExportType === 'member' && !currentMemberId) {
+        alert('Please select a member first');
+        return;
       }
 
-      document.getElementById('exportOptionsModal').classList.remove('active');
+      // 2) v52: the Save window (where supported) opens straight from this click,
+      //    BEFORE any await (key derivation can take a moment and the browser
+      //    only allows the window shortly after a tap/click). The browser then
+      //    reopens it in the folder used last time for this kind of export.
+      //    If the person closes it, nothing happens and this dialog stays open.
+      const target = await openSaveTarget(pendingExportType, encrypt);
+      if (!target) return;
+
       try {
-        if (pendingExportType === 'all') await exportData(encrypt, exportKey, exportSalt, exportIterVer);
-        else if (pendingExportType === 'member') await exportMember(encrypt, exportKey, exportSalt, exportIterVer);
-        else if (pendingExportType === 'zip') await packZip(encrypt, exportKey, exportSalt, exportIterVer);
+        let exportKey = null;
+        let exportSalt = null;
+        let exportIterVer = null;
+        if (encrypt) {
+          if (appReady) {
+            exportKey = cryptoKey;
+            const cfg = getCryptoConfig();
+            exportSalt = cfg.salt;
+            // Whatever iteration count actually produced cryptoKey right now -
+            // could still be the legacy count if this vault hasn't gone
+            // through migratePbkdf2Iterations() yet. Must match exactly, or
+            // import will derive the wrong key from this file.
+            exportIterVer = cfg.iterVer || 1;
+          } else {
+            const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+            exportSalt = bufToB64(saltBytes);
+            exportIterVer = PBKDF2_ITER_VERSION; // fresh salt each export -> always safe to use the current/strongest count
+            exportKey = await deriveKeyFromPasscode(p1, exportSalt, PBKDF2_CONFIGS[exportIterVer]);
+          }
+        }
+        document.getElementById('exportOptionsModal').classList.remove('active');
+        if (pendingExportType === 'all') await exportData(encrypt, exportKey, exportSalt, exportIterVer, target);
+        else if (pendingExportType === 'member') await exportMember(encrypt, exportKey, exportSalt, exportIterVer, target);
+        else if (pendingExportType === 'zip') await packZip(encrypt, exportKey, exportSalt, exportIterVer, target);
       } catch (err) {
+        document.getElementById('exportOptionsModal').classList.remove('active');
         alert('Export failed: ' + err.message);
       }
     });
+
+    // ===== v52: Save window that remembers the last folder =====
+    // On desktop Chrome / Edge, showSaveFilePicker opens a real "Save as" window.
+    // Giving each kind of export its own `id` makes the browser remember the folder
+    // you last saved THAT kind to (backups, member exports and ZIP packs can live
+    // in different folders). Everywhere else (Firefox, Safari, phones, or if the
+    // window is refused) the file is downloaded exactly as before - no web app can
+    // remember a folder on those browsers.
+    const SAVE_PICKER_IDS = { all: 'fhsBackup', member: 'fhsMember', zip: 'fhsZip' };
+    function exportFileInfo(type, encrypt) {
+      const enc = encrypt ? '_encrypted' : '';
+      const safe = x => String(x).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || 'member';
+      if (type === 'zip') return { filename: `FamilyHealthShield_Backup_${localDateStr()}${enc}.zip`, mime: 'application/zip', ext: '.zip', desc: 'Family Health Shield ZIP backup' };
+      if (type === 'member') {
+        const m = members.find(x => x.id === currentMemberId);
+        return { filename: `FamilyHealthShield_${safe(m ? m.name : 'member')}_${localDateStr()}${enc}.json`, mime: 'application/json', ext: '.json', desc: 'Family Health Shield member export' };
+      }
+      return { filename: `FamilyHealthShield_Backup_${localDateStr()}${enc}.json`, mime: 'application/json', ext: '.json', desc: 'Family Health Shield backup' };
+    }
+    // Returns { info, handle } (handle = null means "use a normal download"),
+    // or null if the person closed the Save window.
+    async function openSaveTarget(type, encrypt) {
+      const info = exportFileInfo(type, encrypt);
+      if (typeof window.showSaveFilePicker !== 'function') return { info, handle: null };
+      try {
+        const handle = await window.showSaveFilePicker({
+          id: SAVE_PICKER_IDS[type] || 'fhsExport',
+          startIn: 'documents',
+          suggestedName: info.filename,
+          types: [{ description: info.desc, accept: { [info.mime]: [info.ext] } }]
+        });
+        return { info, handle };
+      } catch (err) {
+        if (err && err.name === 'AbortError') return null; // closed the window: do nothing
+        return { info, handle: null };                      // refused / not allowed here: normal download
+      }
+    }
+    // Returns true when the file was written through the Save window, false when it was downloaded.
+    async function saveBlobToTarget(target, blob) {
+      if (target && target.handle) {
+        const ws = await target.handle.createWritable();
+        try { await ws.write(blob); await ws.close(); }
+        catch (e) { try { await ws.abort(); } catch (_) {} throw e; }
+        return true;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = target && target.info ? target.info.filename : 'FamilyHealthShield_Backup.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      return false;
+    }
 
     // Wraps JSON text in a self-describing encrypted envelope (carries its own
     // salt, so the file can be decrypted on ANY device given the right
@@ -3697,7 +3767,7 @@
       return { fhsExportType: exportType, exportedAt: new Date().toISOString(), members: inflatedMembers };
     }
 
-    async function exportMember(encrypt, key, salt, iterVer) {
+    async function exportMember(encrypt, key, salt, iterVer, target) {
       if (!currentMemberId) {
         alert('Please select a member first');
         return;
@@ -3707,25 +3777,15 @@
       const envelope = buildExportEnvelope(inflated, 'member');
       const data = await buildExportPayload(JSON.stringify(envelope, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `FamilyHealthShield_${m.name}_${localDateStr()}${encrypt ? '_encrypted' : ''}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await saveBlobToTarget(target || { info: exportFileInfo('member', encrypt), handle: null }, blob);
     }
 
-    async function exportData(encrypt, key, salt, iterVer) {
+    async function exportData(encrypt, key, salt, iterVer, target) {
       const inflated = await inflateMembersForExport(members);
       const envelope = buildExportEnvelope(inflated, 'all');
       const data = await buildExportPayload(JSON.stringify(envelope, null, 2), encrypt, key, salt, iterVer);
       const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `FamilyHealthShield_Backup_${localDateStr()}${encrypt ? '_encrypted' : ''}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await saveBlobToTarget(target || { info: exportFileInfo('all', encrypt), handle: null }, blob);
     }
 
     // Unwraps an imported file into { exportType, rawMembers }. New exports carry
@@ -4348,7 +4408,7 @@
     });
 
     // ========== PACK ZIP ==========
-    async function packZip(encrypt, key, salt, iterVer) {
+    async function packZip(encrypt, key, salt, iterVer, target) {
       if (typeof JSZip === 'undefined') {
         alert('JSZip library failed to load. Check internet connection.');
         return;
@@ -4435,14 +4495,9 @@ ${encrypt ? `- Full encryption: the backup JSON AND every file inside attachment
       zip.file('README.txt', instructions);
 
       const blob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `FamilyHealthShield_Backup_${localDateStr()}${encrypt ? '_encrypted' : ''}.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const savedViaPicker = await saveBlobToTarget(target || { info: exportFileInfo('zip', encrypt), handle: null }, blob);
 
-      alert(`📦 ZIP backup downloaded!\n\n${embeddedCount} attachment file(s) were packed in automatically` +
+      alert(`📦 ZIP backup ${savedViaPicker ? 'saved' : 'downloaded'}!\n\n${embeddedCount} attachment file(s) were packed in automatically` +
             (encrypt ? ' and fully encrypted (backup JSON + every attachments/ file).' : ' (plaintext, directly openable).') +
             (missingCount > 0 ? `\n\n${missingCount} older attachment(s) had no embedded data and were skipped - see README.txt.` : ''));
     }
